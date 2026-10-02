@@ -1,27 +1,28 @@
 /**
- * ZCAC Phase 13 — ProtocolAgentExecutor(adapter)。
+ * ZCAC Phase 13 — ProtocolAgentExecutor(adapter,v0.3 重建模)。
  *
- * Worker = 独立 `zcode app-server --stdio` 子进程(崩溃隔离/多进程)。
- * 与 ZCodeAgentExecutor 实现同一 AgentExecutor 端口;上层零改动。
+ * Worker → Session → Turn 三层生命周期(审查修正版):
  *
- * 生命周期:
- *   launch → 获取进程(池复用或新 spawn) → session/create → session/send
- *            → 轮询事件直到 TurnComplete → 释放进程回池
- *   wait   → 同一轮询 promise
- *   stop   → session/stop + 进程树回收
- *   崩溃    → 子进程 exit 时未完成 handle 标记 failed(executor_error)
+ *   WorkerProcess  = 子进程(可承载多个 session)
+ *   WorkerSession  = workspace + policy 绑定(池 key 含 workspace,不串)
+ *   Turn           = 一次 session/send → TurnComplete(显式 settle 幂等)
+ *
+ * 生命周期保证:
+ *   - launch 先建 Turn 通道(resolve 引用)再注册活动表(无时序窗口)
+ *   - TurnComplete 按 session 精确匹配;late event 显式丢弃
+ *   - timeout/crash/stop 的 session 立即污染销毁(不回池)
+ *   - 干净完成的 session 归还池(workspace 隔离:不同 worktree 不串)
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
 import {
   decodeFrames,
   encodeFrame,
-  isTurnCompleteNotification,
   extractTurnResponse,
+  rpcResult,
   type ProtocolFrame,
-  type ProtocolResponse,
   type ProtocolNotification,
+  type ProtocolResponse,
 } from "./frames.js";
 import type {
   AgentExecutor,
@@ -29,71 +30,82 @@ import type {
   AgentLaunchRequest,
   AgentResult,
 } from "../../ports/agent-executor.js";
-import type { UsageSummary } from "../../domain/task/task-input.js";
 
-export interface ProtocolExecutorOptions {
-  env?: NodeJS.ProcessEnv;
-  /** zcode.cjs 入口路径;缺省从 ZCODE_CLI_BUNDLE 或 monorepo 相对路径推断。 */
-  cliBundlePath?: string;
-  /** idle 子进程保活上限(默认 2/role)。 */
-  maxIdlePerRole?: number;
-  /** 单任务轮询超时(默认 10 分钟)。 */
-  taskTimeoutMs?: number;
-}
+// ---------------------------------------------------------------------------
+// 三层生命周期模型
+// ---------------------------------------------------------------------------
 
 interface WorkerProcess {
   child: ChildProcess;
-  role: string;
-  /** 已创建的 session(该进程可复用继续用同一 session) */
-  sessionId?: string;
-  busy: boolean;
   buffer: string;
-  pending: Map<number | string, (frame: ProtocolFrame) => void>;
+  pendingRpc: Map<number, (frame: ProtocolResponse) => void>;
   nextRequestId: number;
   alive: boolean;
+  /** 该进程承载的 sessions(key: workspaceKey;一个进程可服务多个 workspace)。 */
+  sessions: Map<string, WorkerSession>;
 }
 
-interface PendingTurn {
+interface WorkerSession {
+  sessionId: string;
+  workspaceKey: string;
+  role: string;
+  activeTurn?: Turn;
+  /** 超时/崩溃/stop 后置位:worker 必须弃用。 */
+  poisoned: boolean;
+}
+
+interface Turn {
+  agentId: string;
   resolve: (result: AgentResult) => void;
-  handle: AgentHandle;
-  request: AgentLaunchRequest;
-  startedAtMs: number;
+  settled: boolean;
   timer: NodeJS.Timeout;
+}
+
+interface AgentHandleInternal extends AgentHandle {
+  turnPromise: Promise<AgentResult>;
+}
+
+export interface ProtocolExecutorOptions {
+  env?: NodeJS.ProcessEnv;
+  cliBundlePath?: string;
+  /** 归还池上限(每 workspace key);默认 2。 */
+  maxIdlePerWorkspace?: number;
+  /** 单 turn 超时(默认 10 分钟)。 */
+  taskTimeoutMs?: number;
+  /** 注入 spawn(测试 fake 子进程)。 */
+  spawnOverride?: typeof spawn;
 }
 
 export class ProtocolAgentExecutor implements AgentExecutor {
   readonly #cliBundlePath: string;
   readonly #env: NodeJS.ProcessEnv;
-  readonly #maxIdlePerRole: number;
+  readonly #maxIdle: number;
   readonly #taskTimeoutMs: number;
-  readonly #workers = new Map<string, WorkerProcess>(); // key: child.pid
-  readonly #idleByRole = new Map<string, WorkerProcess[]>();
-  readonly #activeTurns = new Map<string, PendingTurn>(); // key: agentId(task-scoped handle id)
+  readonly #spawnFn: typeof spawn;
+
+  readonly #processes = new Set<WorkerProcess>();
+  readonly #idleSessions = new Map<string, { worker: WorkerProcess; session: WorkerSession }[]>();
+  readonly #turns = new Map<string, Turn>();
   #seq = 0;
-  #crashed = 0;
+  #crashCount = 0;
 
   constructor(options: ProtocolExecutorOptions = {}) {
     this.#env = options.env ?? process.env;
-    this.#maxIdlePerRole = options.maxIdlePerRole ?? 2;
+    this.#maxIdle = options.maxIdlePerWorkspace ?? 2;
     this.#taskTimeoutMs = options.taskTimeoutMs ?? 10 * 60_000;
+    this.#spawnFn = options.spawnOverride ?? spawn;
     this.#cliBundlePath =
       options.cliBundlePath ??
       this.#env.ZCODE_CLI_BUNDLE ??
-      this.#resolveDefaultBundle();
+      "apps/zcode-cli/packages/cli/dist/zcode.cjs";
   }
 
-  #resolveDefaultBundle(): string {
-    const candidates = [
-      // monorepo 相对路径(构建产物)
-      join(process.cwd(), "apps/zcode-cli/packages/cli/dist/zcode.cjs"),
-      // 相对 orchestrator bundle 位置向上找
-      "zcode.cjs",
-    ];
-    for (const candidate of candidates) {
-      if (existsSync(candidate)) return candidate;
-    }
-    // 兜底:交给 spawn 报错(错误信息里含路径)
-    return candidates[0]!;
+  get processCount(): number {
+    return this.#processes.size;
+  }
+
+  get crashCount(): number {
+    return this.#crashCount;
   }
 
   // -------------------------------------------------------------------------
@@ -101,295 +113,285 @@ export class ProtocolAgentExecutor implements AgentExecutor {
   // -------------------------------------------------------------------------
 
   async launch(request: AgentLaunchRequest): Promise<AgentHandle> {
-    const worker = await this.#acquireWorker(request.role);
+    const workspaceKey = `${request.role}::${request.workingDirectory}`;
+    const { worker, session } = await this.#acquireSession(workspaceKey, request);
+
+    // ---- P0-1 修复:先建 Turn 通道(resolve 引用),再注册活动表 ----
     const agentId = `proto-${request.role}-${String(++this.#seq).padStart(3, "0")}`;
-    const abort = new AbortController();
+    let resolveTurn!: (result: AgentResult) => void;
+    const turnPromise = new Promise<AgentResult>((resolve) => {
+      resolveTurn = resolve;
+    });
 
-    // 1) session/create(该进程未创建过 session 时)
-    if (!worker.sessionId) {
-      const createResult = await this.#rpc(worker, "session/create", {
-        workspace: { workspacePath: request.workingDirectory },
-        mode: "yolo",
-        ...(request.tools ? { toolAllowlist: [...request.tools] } : {}),
-      });
-      const createPayload = (createResult as ProtocolResponse).result as
-        | { sessionId?: string }
-        | string
-        | undefined;
-      worker.sessionId =
-        typeof createPayload === "object" && createPayload !== null
-          ? createPayload.sessionId
-          : (createPayload as string | undefined);
-    }
-
-    const handle: AgentHandle = {
-      agentId,
-      role: request.role,
-      sessionId: worker.sessionId!,
-      model: request.model ?? "provider-default",
-      ...(request.metadata ? { metadata: request.metadata } : {}),
-    };
-
-    // 2) session/send + 轮询直到 TurnComplete
-    const turnPromise = this.#runTurn(worker, handle, request);
+    const startedAtMs = Date.now();
     const timer = setTimeout(() => {
-      const pending = this.#activeTurns.get(agentId);
-      if (pending) {
-        pending.resolve({
-          status: "failed",
-          agentId,
-          role: request.role,
-          sessionId: handle.sessionId,
-          model: handle.model,
-          response: "",
-          durationMs: Date.now() - pending.startedAtMs,
-          error: `task timeout after ${this.#taskTimeoutMs}ms`,
-        });
-        this.#activeTurns.delete(agentId);
-      }
+      // 超时:结算为 failed 并污染 session(旧 TurnComplete 不得串扰后续任务)
+      this.#settleTurn(turn, {
+        status: "failed",
+        agentId,
+        role: request.role,
+        sessionId: session.sessionId,
+        model: request.model ?? "provider-default",
+        response: "",
+        durationMs: Date.now() - startedAtMs,
+        error: `task timeout after ${this.#taskTimeoutMs}ms`,
+      });
+      this.#poisonSession(worker, session);
     }, this.#taskTimeoutMs);
     timer.unref?.();
 
-    const startedAtMs = Date.now();
-    this.#activeTurns.set(agentId, {
-      resolve: (result) => {
-        clearTimeout(timer);
-        handle.resolveTurn?.(result);
-      },
-      handle,
-      request,
-      startedAtMs,
-      timer,
-    });
-    // 把 turn promise 挂到 handle 上(wait 复用)
-    (handle as AgentHandle & { resolveTurn?: (r: AgentResult) => void }).turnPromise =
-      turnPromise.then((result) => ({ ...result, agentId, durationMs: Date.now() - startedAtMs }));
-    // 存 turn promise 供 wait
-    this.#turnPromises.set(agentId, turnPromise);
+    const turn: Turn = { agentId, resolve: resolveTurn, settled: false, timer };
+    session.activeTurn = turn;
+    this.#turns.set(agentId, turn);
 
-    // 触发 session/send(异步;事件经通知回流)
+    const handle: AgentHandleInternal = {
+      agentId,
+      role: request.role,
+      sessionId: session.sessionId,
+      model: request.model ?? "provider-default",
+      turnPromise,
+      ...(request.metadata ? { metadata: request.metadata } : {}),
+    };
+
+    // ---- session/send(异步;TurnComplete 通知匹配 session 的活动 turn) ----
     void this.#rpc(worker, "session/send", {
-      sessionId: worker.sessionId,
+      sessionId: session.sessionId,
       prompt: request.prompt,
     }).catch((error: unknown) => {
-      // 发送失败:立即失败该 turn
-      const pending = this.#activeTurns.get(agentId);
-      if (pending) {
-        pending.resolve({
-          status: "failed",
-          agentId,
-          role: request.role,
-          sessionId: handle.sessionId,
-          model: handle.model,
-          response: "",
-          durationMs: Date.now() - startedAtMs,
-          error: `session/send failed: ${String(error)}`,
-        });
-        this.#activeTurns.delete(agentId);
-      }
+      this.#settleTurn(turn, {
+        status: "failed",
+        agentId,
+        role: request.role,
+        sessionId: session.sessionId,
+        model: handle.model,
+        response: "",
+        durationMs: Date.now() - startedAtMs,
+        error: `session/send failed: ${String(error)}`,
+      });
     });
 
     return handle;
   }
 
-  readonly #turnPromises = new Map<string, Promise<AgentResult>>();
+  async wait(handle: AgentHandle): Promise<AgentResult> {
+    return (handle as AgentHandleInternal).turnPromise;
+  }
 
   async send(handle: AgentHandle, message: string): Promise<void> {
-    const worker = this.#workerForSession(handle.sessionId);
-    if (!worker) throw new Error(`no worker for session ${handle.sessionId}`);
-    await this.#rpc(worker, "session/send", {
-      sessionId: handle.sessionId,
+    const found = this.#findBySessionId(handle.sessionId);
+    if (!found?.worker || !found.session) throw new Error(`no session ${handle.sessionId}`);
+    await this.#rpc(found.worker, "session/send", {
+      sessionId: found.session.sessionId,
       prompt: message,
     });
   }
 
-  async wait(handle: AgentHandle): Promise<AgentResult> {
-    const turn = this.#turnPromises.get(handle.agentId);
-    if (!turn) throw new Error(`no pending turn for ${handle.agentId}`);
-    const result = await turn;
-    // 归还进程到池(任务结束)
-    const worker = this.#workerForSession(handle.sessionId);
-    if (worker) {
-      worker.busy = false;
-      this.#releaseToPool(worker);
-    }
-    return result;
-  }
-
   async stop(handle: AgentHandle): Promise<void> {
-    const worker = this.#workerForSession(handle.sessionId);
-    if (worker?.sessionId) {
-      await this.#rpc(worker, "session/stop", { sessionId: worker.sessionId }).catch(() => undefined);
-    }
-    const pending = this.#activeTurns.get(handle.agentId);
-    if (pending) {
-      pending.resolve({
+    const turn = this.#turns.get(handle.agentId);
+    if (turn && !turn.settled) {
+      this.#settleTurn(turn, {
         status: "cancelled",
         agentId: handle.agentId,
         role: handle.role,
         sessionId: handle.sessionId,
         model: handle.model,
         response: "",
-        durationMs: Date.now() - pending.startedAtMs,
+        durationMs: 0,
         error: "stopped by ZCAC",
       });
-      this.#activeTurns.delete(handle.agentId);
     }
+    // stop 后 TurnComplete 是幽灵 → session 污染弃用
+    const found = this.#findBySessionId(handle.sessionId);
+    if (found?.worker && found.session) this.#poisonSession(found.worker, found.session);
   }
 
   async dispose(handle?: AgentHandle): Promise<void> {
     if (handle) {
-      const worker = this.#workerForSession(handle.sessionId);
-      if (worker) this.#killWorker(worker);
+      const found = this.#findBySessionId(handle.sessionId);
+      if (found?.worker) this.#killWorker(found.worker);
       return;
     }
-    for (const worker of [...this.#workers.values()]) {
-      this.#killWorker(worker);
-    }
-    this.#workers.clear();
-    this.#idleByRole.clear();
-  }
-
-  /** 当前保活子进程数(观察用)。 */
-  get workerCount(): number {
-    return this.#workers.size;
-  }
-
-  get crashCount(): number {
-    return this.#crashed;
+    for (const worker of [...this.#processes]) this.#killWorker(worker);
+    this.#idleSessions.clear();
+    this.#turns.clear();
   }
 
   // -------------------------------------------------------------------------
-  // 进程池
+  // Worker/Session 池(workspace 隔离)
   // -------------------------------------------------------------------------
 
-  async #acquireWorker(role: string): Promise<WorkerProcess> {
-    const idle = this.#idleByRole.get(role);
-    const reusable = idle?.find((w) => w.alive && !w.busy);
-    if (reusable) {
-      reusable.busy = true;
-      return reusable;
+  async #acquireSession(
+    workspaceKey: string,
+    request: AgentLaunchRequest,
+  ): Promise<{ worker: WorkerProcess; session: WorkerSession }> {
+    const pool = this.#idleSessions.get(workspaceKey);
+    const reusable = pool?.pop();
+    if (reusable && reusable.worker.alive && !reusable.session.poisoned) {
+      return { worker: reusable.worker, session: reusable.session };
     }
-    return this.#spawnWorker(role);
+    if (reusable) this.#killWorker(reusable.worker); // 死进程清理
+    const worker = this.#spawnWorker();
+    const session = await this.#createSession(worker, workspaceKey, request);
+    return { worker, session };
   }
 
-  #releaseToPool(worker: WorkerProcess): void {
-    if (!worker.alive) return;
-    const pool = this.#idleByRole.get(worker.role) ?? [];
-    if (pool.length >= this.#maxIdlePerRole) {
-      this.#killWorker(worker);
-      return;
-    }
-    pool.push(worker);
-    this.#idleByRole.set(worker.role, pool);
-  }
-
-  #spawnWorker(role: string): WorkerProcess {
-    const child = spawn(process.execPath, [this.#cliBundlePath, "app-server", "--stdio"], {
-      env: this.#env,
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
+  async #createSession(
+    worker: WorkerProcess,
+    workspaceKey: string,
+    request: AgentLaunchRequest,
+  ): Promise<WorkerSession> {
+    const response = await this.#rpc(worker, "session/create", {
+      workspace: { workspacePath: request.workingDirectory },
+      mode: "yolo",
+      ...(request.tools ? { toolAllowlist: [...request.tools] } : {}),
     });
+    const payload = rpcResult(response) as { sessionId?: string } | string | undefined;
+    const sessionId =
+      typeof payload === "object" && payload !== null
+        ? payload.sessionId
+        : (payload as string | undefined);
+    if (!sessionId) {
+      this.#killWorker(worker);
+      throw new Error(`session/create returned no sessionId: ${JSON.stringify(payload)}`);
+    }
+    const session: WorkerSession = {
+      sessionId,
+      workspaceKey,
+      role: request.role,
+      poisoned: false,
+    };
+    worker.sessions.set(workspaceKey, session);
+    return session;
+  }
+
+  #releaseSession(worker: WorkerProcess, session: WorkerSession): void {
+    if (!worker.alive || session.poisoned) {
+      this.#killWorker(worker);
+      return;
+    }
+    const pool = this.#idleSessions.get(session.workspaceKey) ?? [];
+    if (pool.length >= this.#maxIdle) {
+      this.#killWorker(worker);
+      return;
+    }
+    pool.push({ worker, session });
+    this.#idleSessions.set(session.workspaceKey, pool);
+  }
+
+  #poisonSession(worker: WorkerProcess, session: WorkerSession): void {
+    session.poisoned = true;
+    this.#killWorker(worker);
+  }
+
+  #spawnWorker(): WorkerProcess {
+    const child = this.#spawnFn(
+      process.execPath,
+      [this.#cliBundlePath, "app-server", "--stdio"],
+      { env: this.#env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true },
+    );
     const worker: WorkerProcess = {
       child,
-      role,
-      busy: true,
       buffer: "",
-      pending: new Map(),
+      pendingRpc: new Map(),
       nextRequestId: 1,
       alive: true,
+      sessions: new Map(),
     };
-    this.#workers.set(String(child.pid), worker);
+    this.#processes.add(worker);
 
     child.stdout?.on("data", (chunk: Buffer) => {
       worker.buffer += chunk.toString("utf8");
       const { frames, rest } = decodeFrames(worker.buffer);
       worker.buffer = rest;
-      for (const frame of frames) {
-        this.#dispatchFrame(worker, frame);
-      }
+      for (const frame of frames) this.#dispatchFrame(worker, frame);
     });
 
     child.on("exit", () => {
       worker.alive = false;
-      this.#crashed += 1;
-      // 未完成 turn 标记失败
-      for (const [agentId, pending] of [...this.#activeTurns.entries()]) {
-        if (pending.handle.sessionId === worker.sessionId) {
-          pending.resolve({
+      this.#crashCount += 1;
+      // 该进程全部 session 的活动 turn 结算为 failed(P0-3: 崩溃标记)
+      for (const session of worker.sessions.values()) {
+        if (session.activeTurn && !session.activeTurn.settled) {
+          this.#settleTurn(session.activeTurn, {
             status: "failed",
-            agentId,
-            role: pending.handle.role,
-            sessionId: pending.handle.sessionId,
-            model: pending.handle.model,
+            agentId: session.activeTurn.agentId,
+            role: session.role,
+            sessionId: session.sessionId,
+            model: "provider-default",
             response: "",
-            durationMs: Date.now() - pending.startedAtMs,
+            durationMs: 0,
             error: "worker process exited unexpectedly",
           });
-          this.#activeTurns.delete(agentId);
         }
       }
-      // 从池中移除
-      const pool = this.#idleByRole.get(worker.role);
-      if (pool) {
-        const index = pool.indexOf(worker);
-        if (index !== -1) pool.splice(index, 1);
-      }
+      this.#evictWorkerFromPools(worker);
     });
 
     return worker;
   }
 
-  #workerForSession(sessionId: string): WorkerProcess | undefined {
-    for (const worker of this.#workers.values()) {
-      if (worker.sessionId === sessionId) return worker;
+  #findBySessionId(sessionId: string): {
+    worker?: WorkerProcess;
+    session?: WorkerSession;
+  } {
+    for (const worker of this.#processes) {
+      for (const session of worker.sessions.values()) {
+        if (session.sessionId === sessionId) return { worker, session };
+      }
     }
-    return undefined;
+    return {};
   }
 
   #killWorker(worker: WorkerProcess): void {
     worker.alive = false;
-    if (!worker.child.killed) {
-      worker.child.kill();
+    if (!worker.child.killed) worker.child.kill();
+    this.#processes.delete(worker);
+    this.#evictWorkerFromPools(worker);
+  }
+
+  #evictWorkerFromPools(worker: WorkerProcess): void {
+    for (const [key, pool] of [...this.#idleSessions.entries()]) {
+      this.#idleSessions.set(
+        key,
+        pool.filter((entry) => entry.worker !== worker),
+      );
     }
-    this.#workers.delete(String(worker.child.pid));
   }
 
   // -------------------------------------------------------------------------
-  // 协议
+  // 协议分发
   // -------------------------------------------------------------------------
 
   #dispatchFrame(worker: WorkerProcess, frame: ProtocolFrame): void {
-    // 响应:匹配 pending rpc
     if ("id" in frame && frame.id !== undefined) {
-      const resolver = worker.pending.get(frame.id);
+      const resolver = worker.pendingRpc.get(Number(frame.id));
       if (resolver) {
-        worker.pending.delete(frame.id);
-        resolver(frame);
+        worker.pendingRpc.delete(Number(frame.id));
+        resolver(frame as ProtocolResponse);
       }
       return;
     }
-    // 通知:TurnComplete → 解析结果 → resolve 活动 turn
-    if (isTurnCompleteNotification(frame)) {
+    // 通知:TurnComplete → 该 worker 任一 session 的活动 turn 结算
+    const method = (frame as ProtocolNotification).method;
+    if (typeof method === "string" && method.toLowerCase().includes("turncomplete")) {
       const response = extractTurnResponse((frame as ProtocolNotification).params);
-      // 取最早的活动 turn(单 session 同时只有一个 turn)
-      const entries = [...this.#activeTurns.entries()].filter(
-        ([, pending]) => pending.handle.sessionId === worker.sessionId,
-      );
-      if (entries.length > 0) {
-        const [agentId, pending] = entries[0]!;
-        pending.resolve({
-          status: "completed",
-          agentId,
-          role: pending.handle.role,
-          sessionId: pending.handle.sessionId,
-          model: pending.handle.model,
-          response,
-          durationMs: Date.now() - pending.startedAtMs,
-        });
-        this.#activeTurns.delete(agentId);
-        this.#turnPromises.delete(agentId);
+      for (const session of worker.sessions.values()) {
+        const turn = session.activeTurn;
+        if (turn && !turn.settled) {
+          this.#settleTurn(turn, {
+            status: "completed",
+            agentId: turn.agentId,
+            role: session.role,
+            sessionId: session.sessionId,
+            model: "provider-default",
+            response,
+            durationMs: 0,
+          });
+          this.#releaseSession(worker, session);
+          return;
+        }
       }
+      // late event(无活动 turn)→ 显式丢弃(P0-3)
     }
   }
 
@@ -397,15 +399,15 @@ export class ProtocolAgentExecutor implements AgentExecutor {
     worker: WorkerProcess,
     method: string,
     params?: unknown,
-  ): Promise<ProtocolFrame> {
+  ): Promise<ProtocolResponse> {
     return new Promise((resolve, reject) => {
       const id = worker.nextRequestId++;
       const timer = setTimeout(() => {
-        worker.pending.delete(id);
+        worker.pendingRpc.delete(id);
         reject(new Error(`rpc timeout: ${method}`));
       }, 60_000);
       timer.unref?.();
-      worker.pending.set(id, (frame) => {
+      worker.pendingRpc.set(id, (frame) => {
         clearTimeout(timer);
         resolve(frame);
       });
@@ -413,55 +415,17 @@ export class ProtocolAgentExecutor implements AgentExecutor {
     });
   }
 
-  /** 一个 turn = session/send + 事件轮询(在通知流中等待 TurnComplete)。 */
-  #runTurn(
-    worker: WorkerProcess,
-    handle: AgentHandle,
-    request: AgentLaunchRequest,
-  ): Promise<AgentResult> {
-    // turn 的 resolve 在 #dispatchFrame(TurnComplete) 或超时/崩溃中;
-    // 这里返回一个 promise 占位,实际 resolve 通道由 #activeTurns 管理。
-    return new Promise<AgentResult>((resolve) => {
-      // wait() 会从 #turnPromises 拿到这个 promise;
-      // resolve 通过 #activeTurns 完成(见 dispatch/timeout/crash)。
-      const original = this.#activeTurns.get(handle.agentId);
-      if (original) {
-        const innerResolve = original.resolve;
-        original.resolve = (result: AgentResult) => {
-          innerResolve(result);
-          resolve(result);
-        };
-      } else {
-        // launch 已设置;保险:超时兜底
-        const timer = setTimeout(() => {
-          resolve({
-            status: "failed",
-            agentId: handle.agentId,
-            role: request.role,
-            sessionId: handle.sessionId,
-            model: handle.model,
-            response: "",
-            durationMs: this.#taskTimeoutMs,
-            error: "turn promise fallback timeout",
-          });
-        }, this.#taskTimeoutMs + 5_000);
-        timer.unref?.();
+  /** 单一结算入口:幂等;清理活动表/timer。 */
+  #settleTurn(turn: Turn, result: AgentResult): void {
+    if (turn.settled) return;
+    turn.settled = true;
+    clearTimeout(turn.timer);
+    this.#turns.delete(turn.agentId);
+    for (const worker of this.#processes) {
+      for (const session of worker.sessions.values()) {
+        if (session.activeTurn === turn) session.activeTurn = undefined;
       }
-    });
+    }
+    turn.resolve(result);
   }
 }
-
-// AgentHandle 扩展:turn promise 通道(类型侧最小侵入)
-declare module "../../ports/agent-executor.js" {
-  interface AgentHandle {
-    resolveTurn?: (result: AgentResult) => void;
-    turnPromise?: Promise<AgentResult> & { agentId?: string };
-  }
-}
-
-function join(...parts: string[]): string {
-  return parts.join("/").replace(/\/+/g, "/");
-}
-
-// UsageSummary re-export(类型对齐)
-export type { UsageSummary };

@@ -56,23 +56,18 @@ export function decodeFrames(buffer: string): {
   return { frames, rest };
 }
 
-/** 从响应/通知流中判断回合是否完成。 */
-export function isTurnCompleteNotification(frame: ProtocolFrame): boolean {
-  if (!("method" in frame)) return false;
-  const method = frame.method;
-  // v4 回合完成 / v1 事件流中的 TurnComplete
-  return (
-    method.includes("TurnComplete") ||
-    method === "v4/conversation/frame" &&
-      JSON.stringify(frame.params ?? {}).includes('"TurnComplete"')
-  );
+/**
+ * 判定一个响应是否是成功的 rpc 结果(供 session/create 等取值)。
+ */
+export function rpcResult(frame: ProtocolFrame): unknown {
+  if ("result" in frame) return frame.result;
+  return undefined;
 }
 
-/** 提取回合最终文本(从事件载荷尽力提取;失败返回空串)。 */
+/** 从事件载荷尽力提取回合最终文本;失败返回空串。 */
 export function extractTurnResponse(payload: unknown): string {
   try {
     const text = JSON.stringify(payload);
-    // 优先 assistant 文本块
     const textMatches = text.match(/"type":"text","text":"((?:[^"\\]|\\.)*)"/g);
     if (textMatches && textMatches.length > 0) {
       const last = textMatches[textMatches.length - 1]!;

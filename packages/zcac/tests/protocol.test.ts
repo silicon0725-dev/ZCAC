@@ -7,8 +7,8 @@ import { describe, it } from "node:test";
 import {
   decodeFrames,
   encodeFrame,
-  isTurnCompleteNotification,
   extractTurnResponse,
+  rpcResult,
 } from "../src/adapters/protocol/frames.js";
 
 describe("protocol frames", () => {
@@ -33,25 +33,6 @@ describe("protocol frames", () => {
     assert.deepEqual(frames[0], { id: 9, result: true });
   });
 
-  it("detects TurnComplete notifications", () => {
-    // v4 帧:params 序列化后含 TurnComplete 字符串
-    assert.equal(
-      isTurnCompleteNotification({ method: "v4/conversation/frame", params: { kind: "TurnComplete" } }),
-      true,
-    );
-    // v1 帧:method 本身含 TurnComplete
-    assert.equal(
-      isTurnCompleteNotification({ method: "session/TurnComplete", params: {} }),
-      true,
-    );
-    // 普通响应不是通知
-    assert.equal(isTurnCompleteNotification({ id: 1, result: {} }), false);
-    // 无关通知
-    assert.equal(
-      isTurnCompleteNotification({ method: "v4/conversation/frame", params: { kind: "Text" } }),
-      false,
-    );
-  });
 
   it("extracts assistant text from event payloads", () => {
     const payload = {
@@ -64,4 +45,11 @@ describe("protocol frames", () => {
     assert.equal(extractTurnResponse(undefined), "");
     assert.equal(extractTurnResponse({ nothing: 1 }), "");
   });
+
+describe("rpcResult", () => {
+  it("extracts result from a response frame", () => {
+    assert.deepEqual(rpcResult({ id: 1, result: { sessionId: "s1" } }), { sessionId: "s1" });
+    assert.equal(rpcResult({ method: "notify" }), undefined);
+  });
+});
 });
