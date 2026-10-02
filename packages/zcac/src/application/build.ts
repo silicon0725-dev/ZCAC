@@ -13,6 +13,9 @@ import { AgentPool } from "./agent-pool.js";
 import { GraphService } from "./graph-service.js";
 import { PipelineService } from "./pipeline.js";
 import { SupervisorService } from "./supervisor.js";
+import { MessageBus } from "./message-bus.js";
+import { DEFAULT_COMMUNICATION_POLICY, type CommunicationPolicy } from "../domain/message/agent-message.js";
+import { SqliteMessageRepository } from "../adapters/sqlite/message-repository.js";
 import { ExponentialBackoffGovernor } from "./rate-governor.js";
 import { RecoveryService } from "./recovery.js";
 import { ReviewLoopService } from "./review-loop.js";
@@ -57,6 +60,8 @@ export interface ZcacOptions {
   governorBaseCooldownMs?: number;
   /** 按角色分配模型(role → providerId/modelId[@level]);multi-model 协作。 */
   roleModels?: Readonly<Record<string, string>>;
+  /** 通信策略(默认 DEFAULT_COMMUNICATION_POLICY)。 */
+  communicationPolicy?: CommunicationPolicy;
   governorMaxCooldownMs?: number;
   /** 计划无 review 时是否追加终审;默认 true。 */
   pipelineAutoReview?: boolean;
@@ -82,6 +87,7 @@ export interface ZcacApp {
   reviewLoop?: ReviewLoopService;
   pipeline?: PipelineService;
   supervisor?: SupervisorService;
+  messageBus?: MessageBus;
   worktrees?: WorktreeService;
   artifacts: SqliteArtifactRepository;
   worktreeRepo: SqliteWorktreeRepository;
@@ -146,6 +152,14 @@ export async function buildZcac(options: ZcacOptions): Promise<ZcacApp> {
     : undefined;
   supervisor?.attach();
 
+  const messageRepo = new SqliteMessageRepository(database);
+  const messageBus = new MessageBus({
+    messages: messageRepo,
+    bus,
+    clock,
+    ...(options.communicationPolicy ? { policy: options.communicationPolicy } : {}),
+  });
+
   const pipelineOn = options.pipeline !== false;
   const pipeline = pipelineOn
     ? new PipelineService({
@@ -156,6 +170,7 @@ export async function buildZcac(options: ZcacOptions): Promise<ZcacApp> {
         clock,
         ...(options.pipelineAutoReview === false ? { autoReview: false } : {}),
         ...(supervisor ? { supervisor } : {}),
+    ...(messageBus ? { messageBus } : {}),
       })
     : undefined;
   pipeline?.attach();
@@ -211,6 +226,7 @@ export async function buildZcac(options: ZcacOptions): Promise<ZcacApp> {
     ...(worktrees ? { worktrees } : {}),
     ...(governor ? { governor } : {}),
     ...(options.roleModels ? { roleModels: options.roleModels } : {}),
+    ...(messageBus ? { messageBus } : {}),
   });
 
   return {
@@ -227,6 +243,7 @@ export async function buildZcac(options: ZcacOptions): Promise<ZcacApp> {
     ...(reviewLoop ? { reviewLoop } : {}),
     ...(pipeline ? { pipeline } : {}),
     ...(supervisor ? { supervisor } : {}),
+    ...(messageBus ? { messageBus } : {}),
     ...(worktrees ? { worktrees } : {}),
     artifacts,
     worktreeRepo,

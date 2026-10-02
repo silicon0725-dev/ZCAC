@@ -92,6 +92,28 @@ CREATE TABLE IF NOT EXISTS zcac_worktrees (
 
 CREATE INDEX IF NOT EXISTS idx_zcac_worktrees_run
     ON zcac_worktrees(run_id);
+
+CREATE TABLE IF NOT EXISTS zcac_messages (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    from_agent TEXT NOT NULL,
+    to_agent TEXT NOT NULL,
+    type TEXT NOT NULL,
+    content TEXT NOT NULL,
+    task_id TEXT,
+    reply_to TEXT,
+    created_at INTEGER NOT NULL,
+    metadata_json TEXT,
+    FOREIGN KEY(run_id) REFERENCES zcac_runs(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_zcac_messages_run_thread
+    ON zcac_messages(run_id, thread_id);
+CREATE INDEX IF NOT EXISTS idx_zcac_messages_run_task
+    ON zcac_messages(run_id, task_id);
+CREATE INDEX IF NOT EXISTS idx_zcac_messages_run_to
+    ON zcac_messages(run_id, to_agent);
 `;
 
 export class SqliteDatabase implements TransactionRunner {

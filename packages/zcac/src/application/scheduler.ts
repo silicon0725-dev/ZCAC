@@ -16,6 +16,7 @@ import type { RateLimitGovernor } from "../ports/rate-governor.js";
 import type { GraphService } from "./graph-service.js";
 import type { TaskService } from "./task-service.js";
 import type { WorktreeService } from "./worktree-service.js";
+import type { MessageBus } from "./message-bus.js";
 
 export type WorkspaceIsolation = "shared" | "worktree";
 
@@ -45,6 +46,8 @@ export interface SchedulerDeps {
    * Pipeline/ReviewLoop/Supervisor 注入的任务不设 model → 自动继承角色模型。
    */
   roleModels?: Readonly<Record<string, string>>;
+  /** Agent 通信总线;注入后任务完成自动生成 handoff,下游 prompt 注入上游上下文。 */
+  messageBus?: MessageBus;
 }
 
 export interface DrainOptions {
@@ -206,9 +209,17 @@ export class Scheduler {
       // 模型解析:显式指定 > 角色分配(multi-model)> executor 默认
       const resolvedModel =
         task.input.model ?? this.deps.roleModels?.[role];
+      // ZCAC-0011 Layer 1:注入上游任务的 handoff 上下文
+      let effectivePrompt = task.input.prompt;
+      if (this.deps.messageBus) {
+        const handoff = this.deps.messageBus.injectHandoffContext(task);
+        if (handoff) {
+          effectivePrompt = `${handoff}${task.input.prompt}`;
+        }
+      }
       handle = await this.deps.executor.launch({
         role,
-        prompt: task.input.prompt,
+        prompt: effectivePrompt,
         description: `${task.kind} ${task.id}`,
         workingDirectory: worktreePath ?? task.input.workspacePath ?? this.deps.defaultWorkingDirectory,
         ...(resolvedModel ? { model: resolvedModel } : {}),
@@ -243,6 +254,16 @@ export class Scheduler {
         this.deps.taskService.completeTask(task.id, output);
         this.#emitArtifact(task, handle, output);
         this.deps.governor?.noteTaskSuccess();
+        // ZCAC-0011:任务完成自动生成 handoff Message(下游任务可消费)
+        if (this.deps.messageBus) {
+          try {
+            this.deps.messageBus.generateHandoff(
+              this.deps.tasks.get(task.id) ?? { ...task, status: "succeeded", output },
+            );
+          } catch {
+            // handoff 生成失败不影响任务结果
+          }
+        }
       } else {
         const failure = errorFromResult(result);
         this.deps.governor?.noteTaskFailure(failure);

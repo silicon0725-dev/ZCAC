@@ -332,6 +332,164 @@ async function main(): Promise<void> {
     },
   );
 
+  // -------------------------------------------------------------------------
+  // ZCAC-0011: Agent Communication MCP tools
+  // -------------------------------------------------------------------------
+
+  registerZcacTool(
+    "send_message",
+    {
+      description:
+        "Send a structured message from one agent to another via the ZCAC Message Bus. Communication policy is enforced (some routes may be denied). Supports threads for multi-turn conversations.",
+      inputSchema: {
+        runId: z.string().describe("Run ID (defaults to latest)"),
+        fromAgent: z.string().describe("Sender role (e.g. coder, planner, explorer)"),
+        toAgent: z.string().describe("Receiver role, or '*' for broadcast"),
+        type: z.enum(["question", "finding", "request", "broadcast"]).describe("Message type"),
+        content: z.string().describe("Message content"),
+        taskId: z.string().optional().describe("Related task ID"),
+        threadId: z.string().optional().describe("Thread ID for multi-turn conversation"),
+        replyTo: z.string().optional().describe("Message ID being replied to"),
+      },
+    },
+    async (input: {
+      runId?: string;
+      fromAgent: string;
+      toAgent: string;
+      type: string;
+      content: string;
+      taskId?: string;
+      threadId?: string;
+      replyTo?: string;
+    }) => {
+      try {
+        const runId = input.runId ?? latestRunId(app);
+        if (!runId) throw new Error("no run found");
+        if (!app.messageBus) throw new Error("message bus not configured");
+        const message = app.messageBus.send({
+          runId,
+          fromAgent: input.fromAgent,
+          toAgent: input.toAgent,
+          type: input.type as "question" | "finding" | "request" | "broadcast",
+          content: input.content,
+          ...(input.taskId ? { taskId: input.taskId } : {}),
+          ...(input.threadId ? { threadId: input.threadId } : {}),
+          ...(input.replyTo ? { replyTo: input.replyTo } : {}),
+        });
+        return ok({
+          messageId: message.id,
+          threadId: message.threadId,
+          delivered: true,
+        });
+      } catch (error) {
+        return err(error);
+      }
+    },
+  );
+
+  registerZcacTool(
+    "get_messages",
+    {
+      description:
+        "Retrieve messages from the ZCAC Message Bus. Filter by agent, thread, or task. Returns messages with thread/reply correlation.",
+      inputSchema: {
+        runId: z.string().optional().describe("Run ID (defaults to latest)"),
+        toAgent: z.string().optional().describe("Filter: messages sent to this agent"),
+        fromAgent: z.string().optional().describe("Filter: messages from this agent"),
+        threadId: z.string().optional().describe("Filter: messages in this thread"),
+        taskId: z.string().optional().describe("Filter: messages related to this task"),
+      },
+    },
+    async (input: {
+      runId?: string;
+      toAgent?: string;
+      fromAgent?: string;
+      threadId?: string;
+      taskId?: string;
+    }) => {
+      try {
+        const runId = input.runId ?? latestRunId(app);
+        if (!runId) return ok({ messages: [] });
+        if (!app.messageBus) throw new Error("message bus not configured");
+        const messages = app.messageBus.getMessages({
+          runId,
+          ...(input.toAgent ? { toAgent: input.toAgent } : {}),
+          ...(input.fromAgent ? { fromAgent: input.fromAgent } : {}),
+          ...(input.threadId ? { threadId: input.threadId } : {}),
+          ...(input.taskId ? { taskId: input.taskId } : {}),
+        });
+        return ok({
+          count: messages.length,
+          messages: messages.map((m) => ({
+            id: m.id,
+            threadId: m.threadId,
+            from: m.fromAgent,
+            to: m.toAgent,
+            type: m.type,
+            content: m.content.slice(0, 500),
+            taskId: m.taskId,
+            replyTo: m.replyTo,
+            createdAt: m.createdAt,
+          })),
+        });
+      } catch (error) {
+        return err(error);
+      }
+    },
+  );
+
+  registerZcacTool(
+    "reply_message",
+    {
+      description:
+        "Reply to a specific message. Automatically joins the sender's thread and routes to the original sender.",
+      inputSchema: {
+        messageId: z.string().describe("ID of the message being replied to"),
+        fromAgent: z.string().describe("Replying agent role"),
+        content: z.string().describe("Reply content"),
+      },
+    },
+    async (input: { messageId: string; fromAgent: string; content: string }) => {
+      try {
+        if (!app.messageBus) throw new Error("message bus not configured");
+        const reply = app.messageBus.reply(input.messageId, input.fromAgent, input.content);
+        return ok({ messageId: reply.id, threadId: reply.threadId, delivered: true });
+      } catch (error) {
+        return err(error);
+      }
+    },
+  );
+
+  registerZcacTool(
+    "get_thread",
+    {
+      description:
+        "Get all messages in a conversation thread, ordered by time. Shows the full communication chain between agents.",
+      inputSchema: {
+        threadId: z.string().describe("Thread ID"),
+      },
+    },
+    async (input: { threadId: string }) => {
+      try {
+        if (!app.messageBus) throw new Error("message bus not configured");
+        const messages = app.messageBus.getThread(input.threadId);
+        return ok({
+          threadId: input.threadId,
+          count: messages.length,
+          messages: messages.map((m) => ({
+            from: m.fromAgent,
+            to: m.toAgent,
+            type: m.type,
+            content: m.content.slice(0, 300),
+            createdAt: m.createdAt,
+          })),
+        });
+      } catch (error) {
+        return err(error);
+      }
+    },
+  );
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("[zcac] MCP server connected (stdio)");
