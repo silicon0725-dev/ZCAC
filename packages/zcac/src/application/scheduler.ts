@@ -69,6 +69,7 @@ export interface SchedulerSnapshot {
 
 export class Scheduler {
   readonly #inFlight = new Map<TaskId, Promise<void>>();
+  readonly #wakeWaiters = new Set<() => void>();
   readonly maxConcurrentTasks: number;
   readonly heartbeatIntervalMs: number;
 
@@ -108,9 +109,26 @@ export class Scheduler {
       options.onTick?.(this.snapshot(runId));
 
       if (this.#inFlight.size > 0) {
-        // 等任一任务完成,或睡到 deadline 再评估(防止错过超时检查)。
+        // 等任一任务完成(可唤醒)或 deadline(兜底,防错过超时检查)。
         const remaining = deadline - this.deps.clock.now();
-        await Promise.race([...this.#inFlight.values(), sleep(Math.max(0, remaining))]);
+        await Promise.race([
+          ...this.#inFlight.values(),
+          new Promise<void>((resolve) => {
+            let done = false;
+            const wake = () => {
+              if (done) return;
+              done = true;
+              this.#wakeWaiters.delete(wake);
+              resolve();
+            };
+            this.#wakeWaiters.add(wake);
+            // setImmediate 保底推进:即使 in-flight 的内部 timer 全部 unref,
+            // 事件循环仍有活动的 macrotask 唤醒本循环(修复 drain 挂起,实测踩过)。
+            setImmediate(wake);
+            const timer = setTimeout(wake, Math.max(0, remaining));
+            timer.unref?.();
+          }),
+        ]);
         continue;
       }
 
@@ -315,6 +333,15 @@ export class Scheduler {
         this.deps.taskService.releaseAgent(task.id);
       }
       this.deps.pool.release(slot.id, this.deps.clock.now());
+      this.#wakeAllWaiters();
+    }
+  }
+
+  /** 唤醒所有 drain 等待者(任务完成/状态变化时)。 */
+  #wakeAllWaiters(): void {
+    for (const wake of [...this.#wakeWaiters]) {
+      this.#wakeWaiters.delete(wake);
+      wake();
     }
   }
 
