@@ -1,0 +1,86 @@
+/**
+ * ZCAC Phase 13 — 协议帧解析(纯函数,独立可测)。
+ *
+ * ZCode Protocol v1 over NDJSON:
+ *   请求  {id, method, params}
+ *   响应  {id, result} | {id, error}
+ *   通知  {method, params}
+ */
+
+export interface ProtocolRequest {
+  id: number | string;
+  method: string;
+  params?: unknown;
+}
+
+export interface ProtocolResponse {
+  id: number | string;
+  result?: unknown;
+  error?: { code: number | string; message: string };
+}
+
+export interface ProtocolNotification {
+  method: string;
+  params?: unknown;
+}
+
+export type ProtocolFrame = ProtocolResponse | ProtocolNotification;
+
+/** 编码一帧 NDJSON(含换行)。 */
+export function encodeFrame(frame: ProtocolRequest): string {
+  return `${JSON.stringify(frame)}\n`;
+}
+
+/**
+ * 从流缓冲中解析完整帧(NDJSON 按行分割;不完整行保留在缓冲)。
+ * 返回解析出的响应/通知 + 剩余缓冲。
+ */
+export function decodeFrames(buffer: string): {
+  frames: ProtocolFrame[];
+  rest: string;
+} {
+  const frames: ProtocolFrame[] = [];
+  let rest = buffer;
+  let newlineIndex: number;
+  while ((newlineIndex = rest.indexOf("\n")) !== -1) {
+    const line = rest.slice(0, newlineIndex).trim();
+    rest = rest.slice(newlineIndex + 1);
+    if (line.length === 0) continue;
+    try {
+      const parsed = JSON.parse(line) as ProtocolFrame;
+      frames.push(parsed);
+    } catch {
+      // 非 JSON 行(子进程日志污染):跳过,不中断流
+    }
+  }
+  return { frames, rest };
+}
+
+/** 从响应/通知流中判断回合是否完成。 */
+export function isTurnCompleteNotification(frame: ProtocolFrame): boolean {
+  if (!("method" in frame)) return false;
+  const method = frame.method;
+  // v4 回合完成 / v1 事件流中的 TurnComplete
+  return (
+    method.includes("TurnComplete") ||
+    method === "v4/conversation/frame" &&
+      JSON.stringify(frame.params ?? {}).includes('"TurnComplete"')
+  );
+}
+
+/** 提取回合最终文本(从事件载荷尽力提取;失败返回空串)。 */
+export function extractTurnResponse(payload: unknown): string {
+  try {
+    const text = JSON.stringify(payload);
+    // 优先 assistant 文本块
+    const textMatches = text.match(/"type":"text","text":"((?:[^"\\]|\\.)*)"/g);
+    if (textMatches && textMatches.length > 0) {
+      const last = textMatches[textMatches.length - 1]!;
+      const inner = last.slice('"type":"text","text":"'.length, -1);
+      return JSON.parse(`"${inner}"`) as string;
+    }
+    return "";
+  } catch {
+    return "";
+  }
+}

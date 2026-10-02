@@ -33,6 +33,7 @@ import type {
 import { buildZcac, type ZcacApp } from "../application/build.js";
 import { buildPlanPrompt } from "../application/pipeline.js";
 import { ZCodeAgentExecutor } from "../adapters/zcode/agent-executor.js";
+import { ProtocolAgentExecutor } from "../adapters/protocol/agent-executor.js";
 import { AutoFakeExecutor } from "../adapters/fake/agent-executor.js";
 import type { AgentExecutor } from "../ports/agent-executor.js";
 import type { Task } from "../domain/task/task.js";
@@ -59,10 +60,17 @@ async function main(): Promise<void> {
     if (model) roleModels[role] = model;
   }
 
+  // v0.3: worker 模式切换(in-process 默认;protocol = 独立子进程,崩溃隔离)
+  const workerMode = env("ZCAC_WORKER_MODE") === "protocol" ? "protocol" : "in-process";
   const executor: AgentExecutor =
     env("ZCAC_TEST_FAKE") === "1"
       ? new AutoFakeExecutor()
-      : new ZCodeAgentExecutor({ env: process.env });
+      : workerMode === "protocol"
+        ? new ProtocolAgentExecutor({
+            env: process.env,
+            ...(env("ZCODE_CLI_BUNDLE") ? { cliBundlePath: env("ZCODE_CLI_BUNDLE")! } : {}),
+          })
+        : new ZCodeAgentExecutor({ env: process.env });
 
   const app: ZcacApp = await buildZcac({
     databasePath: join(dataDir, "zcac.sqlite"),
@@ -74,7 +82,7 @@ async function main(): Promise<void> {
   });
 
   console.error(
-    `[zcac] orchestrator ready (workspace=${workspace}, isolation=${isolation}, data=${dataDir}` +
+    `[zcac] orchestrator ready (mode=${workerMode}, workspace=${workspace}, isolation=${isolation}, data=${dataDir}` +
       `${Object.keys(roleModels).length > 0 ? `, roleModels=${JSON.stringify(roleModels)}` : ""})`,
   );
 
