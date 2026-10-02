@@ -1,0 +1,29 @@
+{
+  "name": "zcac",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "ZCAC (ZCode Agent Cluster) — Phase 1 Task Core: domain/application/ports + sqlite adapter + ZCode executor adapter",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && pnpm run bundle && pnpm run bundle:orchestrator",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "bundle": "esbuild src/poc.ts src/e2e.ts src/e2e-parallel.ts src/e2e-review.ts src/e2e-worktree.ts src/e2e-pipeline.ts src/e2e-pipeline-worktree.ts src/adapters/zcode/list-models.ts --bundle --platform=node --format=cjs --outdir=dist --out-extension:.js=.cjs --sourcemap=external --log-level=warning --external:@zcode/tui --external:playwright-core --external:koffi",
+    "bundle:orchestrator": "esbuild src/mcp/orchestrator.ts --bundle --platform=node --format=cjs --outfile=plugin/dist/orchestrator.cjs --sourcemap=external --log-level=warning --external:@zcode/tui --external:playwright-core --external:koffi",
+    "test": "tsc -p tsconfig.json && node --test \"dist/tests/*.test.js\"",
+    "poc": "node dist/poc.cjs",
+    "e2e": "node dist/e2e.cjs",
+    "e2e-parallel": "node dist/e2e-parallel.cjs",
+    "e2e-review": "node dist/e2e-review.cjs",
+    "e2e-worktree": "node dist/e2e-worktree.cjs",
+    "models": "node dist/adapters/zcode/list-models.cjs"
+  },
+  "dependencies": {
+    "@zcode/bootstrap": "workspace:*",
+    "@zcode/contracts": "workspace:*",
+    "@zcode/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "typescript": "^6.0.2"
+  }
+}

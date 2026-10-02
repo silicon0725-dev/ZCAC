@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "zcac": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${ZCODE_PLUGIN_ROOT}/dist/orchestrator.cjs"],
+      "env": {
+        "ZCAC_MODEL": "${user_config.zcacModel}",
+        "ZCAC_ISOLATION": "${user_config.zcacIsolation}",
+        "ZCAC_CONCURRENCY": "${user_config.zcacConcurrency}"
+      }
+    }
+  }
+}

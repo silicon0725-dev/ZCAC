@@ -1,0 +1,31 @@
+{
+  "name": "zcode-agent-cluster",
+  "version": "0.1.0",
+  "description": "ZCAC — multi-agent coding cluster orchestration on top of the ZCode Agent Runtime (task graph, scheduler, agent pool, review loop, git worktree isolation).",
+  "author": { "name": "ZCAC" },
+  "license": "Apache-2.0",
+  "keywords": ["agents", "orchestration", "cluster", "multi-agent"],
+  "agents": "agents",
+  "commands": "commands",
+  "skills": "skills",
+  "userConfig": {
+    "zcacModel": {
+      "type": "string",
+      "title": "Default model",
+      "description": "Logical model id providerId/modelId[@reasoningLevel] used by cluster workers",
+      "default": "bigmodel-api/GLM-5.3-Flash@low"
+    },
+    "zcacIsolation": {
+      "type": "string",
+      "title": "Workspace isolation",
+      "description": "shared (workers share the workspace) or worktree (each write task gets its own git worktree, merged back on success)",
+      "default": "shared"
+    },
+    "zcacConcurrency": {
+      "type": "number",
+      "title": "Max concurrent tasks",
+      "description": "Global task concurrency for the cluster scheduler",
+      "default": 2
+    }
+  }
+}

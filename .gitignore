@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.cjs
+*.cjs.map
+*.tsbuildinfo
+.DS_Store
+Thumbs.db
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
