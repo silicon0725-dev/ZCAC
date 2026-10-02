@@ -11,9 +11,39 @@
   "userConfig": {
     "zcacModel": {
       "type": "string",
-      "title": "Default model",
-      "description": "Logical model id providerId/modelId[@reasoningLevel] used by cluster workers",
+      "title": "Default model (fallback for all roles)",
+      "description": "Logical model id providerId/modelId[@reasoningLevel] used when no role-specific model is set",
       "default": "bigmodel-api/GLM-5.3-Flash@low"
+    },
+    "zcacModelPlanner": {
+      "type": "string",
+      "title": "Planner model",
+      "description": "Model for the planner role (task decomposition). Leave empty to use default.",
+      "default": ""
+    },
+    "zcacModelCoder": {
+      "type": "string",
+      "title": "Coder model",
+      "description": "Model for coder workers (code implementation). Leave empty to use default.",
+      "default": ""
+    },
+    "zcacModelTester": {
+      "type": "string",
+      "title": "Tester model",
+      "description": "Model for tester workers (run tests). Leave empty to use default.",
+      "default": ""
+    },
+    "zcacModelReviewer": {
+      "type": "string",
+      "title": "Reviewer model",
+      "description": "Model for reviewer workers (code review). Leave empty to use default.",
+      "default": ""
+    },
+    "zcacModelExplorer": {
+      "type": "string",
+      "title": "Explorer model",
+      "description": "Model for explorer workers (read-only analysis). Leave empty to use default.",
+      "default": ""
     },
     "zcacIsolation": {
       "type": "string",

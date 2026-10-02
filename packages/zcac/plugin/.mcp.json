@@ -6,6 +6,11 @@
       "args": ["${ZCODE_PLUGIN_ROOT}/dist/orchestrator.cjs"],
       "env": {
         "ZCAC_MODEL": "${user_config.zcacModel}",
+        "ZCAC_MODEL_PLANNER": "${user_config.zcacModelPlanner}",
+        "ZCAC_MODEL_CODER": "${user_config.zcacModelCoder}",
+        "ZCAC_MODEL_TESTER": "${user_config.zcacModelTester}",
+        "ZCAC_MODEL_REVIEWER": "${user_config.zcacModelReviewer}",
+        "ZCAC_MODEL_EXPLORER": "${user_config.zcacModelExplorer}",
         "ZCAC_ISOLATION": "${user_config.zcacIsolation}",
         "ZCAC_CONCURRENCY": "${user_config.zcacConcurrency}"
       }

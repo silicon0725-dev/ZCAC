@@ -55,6 +55,8 @@ export interface ZcacOptions {
   supervisorMaxDecisions?: number;
   /** 调度层限流退避;默认装配(0 关闭:baseCooldownMs=0)。 */
   governorBaseCooldownMs?: number;
+  /** 按角色分配模型(role → providerId/modelId[@level]);multi-model 协作。 */
+  roleModels?: Readonly<Record<string, string>>;
   governorMaxCooldownMs?: number;
   /** 计划无 review 时是否追加终审;默认 true。 */
   pipelineAutoReview?: boolean;
@@ -208,6 +210,7 @@ export async function buildZcac(options: ZcacOptions): Promise<ZcacApp> {
     ...(options.isolationRoles ? { isolationRoles: options.isolationRoles } : {}),
     ...(worktrees ? { worktrees } : {}),
     ...(governor ? { governor } : {}),
+    ...(options.roleModels ? { roleModels: options.roleModels } : {}),
   });
 
   return {

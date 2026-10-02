@@ -8,6 +8,11 @@
  *
  * 环境变量:
  *   ZCAC_MODEL       默认逻辑模型(provider/model@level)
+ *   ZCAC_MODEL_PLANNER  planner 角色专属模型(multi-model;空=用默认)
+ *   ZCAC_MODEL_CODER     coder 角色专属模型
+ *   ZCAC_MODEL_TESTER    tester 角色专属模型
+ *   ZCAC_MODEL_REVIEWER  reviewer 角色专属模型
+ *   ZCAC_MODEL_EXPLORER  explorer 角色专属模型
  *   ZCAC_ISOLATION   shared | worktree(默认 shared)
  *   ZCAC_DATA_DIR    状态目录(默认 ~/.zcode/zcac)
  *   ZCAC_WORKSPACE   默认工作目录(默认 process.cwd(),插件拉起时即工作区)
@@ -47,6 +52,13 @@ async function main(): Promise<void> {
   const isolation = env("ZCAC_ISOLATION") === "worktree" ? ("worktree" as const) : ("shared" as const);
   const concurrency = Number(env("ZCAC_CONCURRENCY") ?? "2") || 2;
 
+  // multi-model:按角色分配模型(空值跳过;未配置的角色回退到全局默认)
+  const roleModels: Record<string, string> = {};
+  for (const role of ["planner", "coder", "tester", "reviewer", "explorer"] as const) {
+    const model = env(`ZCAC_MODEL_${role.toUpperCase()}`);
+    if (model) roleModels[role] = model;
+  }
+
   const executor: AgentExecutor =
     env("ZCAC_TEST_FAKE") === "1"
       ? new AutoFakeExecutor()
@@ -58,9 +70,13 @@ async function main(): Promise<void> {
     defaultWorkingDirectory: workspace,
     maxConcurrentTasks: concurrency,
     isolation,
+    ...(Object.keys(roleModels).length > 0 ? { roleModels } : {}),
   });
 
-  console.error(`[zcac] orchestrator ready (workspace=${workspace}, isolation=${isolation}, data=${dataDir})`);
+  console.error(
+    `[zcac] orchestrator ready (workspace=${workspace}, isolation=${isolation}, data=${dataDir}` +
+      `${Object.keys(roleModels).length > 0 ? `, roleModels=${JSON.stringify(roleModels)}` : ""})`,
+  );
 
   // 后台 run 登记表:cluster_status 聚合 + 崩溃语义。
   const activeDrains = new Map<string, Promise<void>>();

@@ -39,6 +39,12 @@ export interface SchedulerDeps {
   worktrees?: WorktreeService;
   /** 调度层限流退避;缺省不限制(测试向后兼容),build 默认装配。 */
   governor?: RateLimitGovernor;
+  /**
+   * 按角色分配模型(multi-model):role → 逻辑模型标识。
+   * 优先级:task.input.model(显式)> roleModels[role] > 全局默认(executor 层)。
+   * Pipeline/ReviewLoop/Supervisor 注入的任务不设 model → 自动继承角色模型。
+   */
+  roleModels?: Readonly<Record<string, string>>;
 }
 
 export interface DrainOptions {
@@ -197,12 +203,15 @@ export class Scheduler {
     }, this.heartbeatIntervalMs);
     heartbeat.unref?.();
     try {
+      // 模型解析:显式指定 > 角色分配(multi-model)> executor 默认
+      const resolvedModel =
+        task.input.model ?? this.deps.roleModels?.[role];
       handle = await this.deps.executor.launch({
         role,
         prompt: task.input.prompt,
         description: `${task.kind} ${task.id}`,
         workingDirectory: worktreePath ?? task.input.workspacePath ?? this.deps.defaultWorkingDirectory,
-        ...(task.input.model ? { model: task.input.model } : {}),
+        ...(resolvedModel ? { model: resolvedModel } : {}),
         metadata: { runId: task.runId, taskId: task.id },
       });
       this.#handles.set(task.id, handle);
