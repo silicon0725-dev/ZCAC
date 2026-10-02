@@ -78,6 +78,15 @@ export class Scheduler {
     return this.#inFlight.size;
   }
 
+  /** 运行时修改角色模型分配(立即生效,新 claim 的任务使用新模型)。 */
+  setRoleModels(models: Record<string, string>): void {
+    (this.deps as { roleModels?: Record<string, string> }).roleModels = models;
+  }
+
+  getRoleModels(): Readonly<Record<string, string>> {
+    return this.deps.roleModels ?? {};
+  }
+
   /**
    * 驱动 run 直到完成/失败/超时。确定性执行(测试与 E2E 复用):
    * 循环 { readiness 重算 → retry 提升 → claim+launch(不阻塞) → 等一个完成 }。

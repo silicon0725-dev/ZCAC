@@ -175,6 +175,60 @@ export class ZCodeAgentExecutor implements AgentExecutor {
     return this.registryPromise;
   }
 
+  /**
+   * 枚举 Provider Registry 中所有可用模型(含 reasoning levels)。
+   * 供 MCP list_models 工具使用 — 主模型可展示给用户做下拉选择。
+   */
+  async listModels(): Promise<
+    Array<{
+      providerId: string;
+      providerName: string;
+      modelId: string;
+      enabled: boolean;
+      reasoningLevels: string[];
+      contextWindow?: number;
+      supportsImage?: boolean;
+    }>
+  > {
+    const registry = await this.ensureRegistry();
+    const providers = registry.runtime.registryService.listProviders();
+    const models: Array<{
+      providerId: string;
+      providerName: string;
+      modelId: string;
+      enabled: boolean;
+      reasoningLevels: string[];
+      contextWindow?: number;
+      supportsImage?: boolean;
+    }> = [];
+    for (const provider of providers) {
+      for (const model of provider.models) {
+        const config = model.config as unknown as Record<string, unknown>;
+        const optionSpecs = (config?.optionSpecs ?? {}) as Record<string, unknown>;
+        const reasoning = optionSpecs.reasoningLevel as Record<string, unknown> | undefined;
+        const levels = Array.isArray(reasoning?.values)
+          ? (reasoning.values as string[])
+          : [];
+        const properties = (config?.properties ?? {}) as Record<string, unknown>;
+        const inputFormat = (properties?.inputFormat ?? {}) as Record<string, unknown>;
+        models.push({
+          providerId: provider.providerId,
+          providerName: provider.providerName ?? provider.providerId,
+          modelId: model.modelId,
+          enabled: config?.enabled !== false,
+          reasoningLevels: levels,
+          ...(typeof properties?.contextWindow === "number"
+            ? { contextWindow: properties.contextWindow }
+            : {}),
+          ...(typeof inputFormat?.supportsImage === "boolean"
+            ? { supportsImage: inputFormat.supportsImage }
+            : {}),
+        });
+      }
+    }
+    return models;
+  }
+
   async launch(request: AgentLaunchRequest): Promise<AgentHandle> {
     const preset = this.presets[request.role];
     if (!preset) {

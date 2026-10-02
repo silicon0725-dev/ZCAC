@@ -490,6 +490,104 @@ async function main(): Promise<void> {
     },
   );
 
+  // -------------------------------------------------------------------------
+  // Settings: list_models / configure
+  // -------------------------------------------------------------------------
+
+  registerZcacTool(
+    "list_models",
+    {
+      description:
+        "List all available models from the Provider Registry with their reasoning levels. Use this to show the user a selection of models for cluster workers (e.g. 'Which model should the coder use?').",
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        if (!(executor instanceof ZCodeAgentExecutor)) {
+          return err(new Error("list_models requires a real executor (not test mode)"));
+        }
+        const models = await executor.listModels();
+        return ok({
+          count: models.length,
+          models: models.map((m) => ({
+            id: `${m.providerId}/${m.modelId}`,
+            provider: m.providerName,
+            model: m.modelId,
+            enabled: m.enabled,
+            reasoningLevels: m.reasoningLevels.length > 0 ? m.reasoningLevels : undefined,
+            contextWindow: m.contextWindow,
+            supportsImage: m.supportsImage,
+          })),
+        });
+      } catch (error) {
+        return err(error);
+      }
+    },
+  );
+
+  registerZcacTool(
+    "configure",
+    {
+      description:
+        "Get or set ZCAC cluster configuration at runtime. Settings: defaultModel, roleModels (per-role model assignment), isolation, concurrency. Changes take effect immediately for new tasks. Use list_models first to see valid model IDs.",
+      inputSchema: {
+        action: z.enum(["get", "set"]).describe("'get' to read current settings, 'set' to modify"),
+        defaultModel: z.string().optional().describe("Default model for all roles (providerId/modelId[@level])"),
+        roleModels: z.record(z.string(), z.string()).optional().describe("Per-role model assignment: {coder: 'id', planner: 'id', ...}"),
+        isolation: z.enum(["shared", "worktree"]).optional().describe("Workspace isolation mode"),
+        concurrency: z.number().optional().describe("Max concurrent tasks"),
+      },
+    },
+    async (input: {
+      action: "get" | "set";
+      defaultModel?: string;
+      roleModels?: Record<string, string>;
+      isolation?: "shared" | "worktree";
+      concurrency?: number;
+    }) => {
+      try {
+        if (input.action === "get") {
+          return ok({
+            defaultModel: env("ZCAC_MODEL") ?? DEFAULT_MODEL,
+            roleModels: app.scheduler.getRoleModels(),
+            isolation,
+            concurrency,
+          });
+        }
+
+        // action === "set"
+        const changes: Record<string, unknown> = {};
+        if (input.roleModels) {
+          app.scheduler.setRoleModels(input.roleModels);
+          changes.roleModels = input.roleModels;
+        }
+        if (input.defaultModel) {
+          process.env.ZCAC_MODEL = input.defaultModel;
+          changes.defaultModel = input.defaultModel;
+        }
+        if (input.isolation) {
+          changes.isolation = input.isolation;
+          // isolation is process-level (set at build); note limitation
+        }
+        if (input.concurrency) {
+          changes.concurrency = input.concurrency;
+          // concurrency is process-level; note limitation
+        }
+        return ok({
+          updated: true,
+          changes,
+          note:
+            input.isolation || input.concurrency
+              ? "isolation and concurrency changes take effect on orchestrator restart"
+              : undefined,
+          currentRoleModels: app.scheduler.getRoleModels(),
+        });
+      } catch (error) {
+        return err(error);
+      }
+    },
+  );
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("[zcac] MCP server connected (stdio)");

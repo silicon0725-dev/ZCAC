@@ -4,30 +4,29 @@ argument-hint: <task description> [pipeline]
 ---
 Run the user's task through the ZCAC cluster using the `mcp__zcac__*` MCP tools:
 
+**Model selection** (only if the user hasn't specified or this is a new setup):
+Before creating the run, call `mcp__zcac__list_models` to see available models.
+If the user hasn't chosen models yet, offer a brief selection (e.g. "Fast (Flash) or Smart (Pro)?").
+Use `mcp__zcac__configure` with `action: "set"` to assign role models if the user
+wants different models for different roles (e.g. planner/coder/tester).
+
+**Running the task:**
 1. Choose the mode:
-   - `pipeline` (default for anything bigger than a trivial one-file change): a planner
-     decomposes the task, then implement/test tasks run in parallel or sequence, and a
-     final review closes the loop.
-   - `single`: one coder task, no planning (good for trivial changes).
-2. Call `mcp__zcac__cluster_create` with the full task text below as the `task` argument
-   and the chosen `mode`.
-3. Poll `mcp__zcac__cluster_status` (every call returns the task counts and an event tail)
-   until the run status is `completed` or `failed`. Do not poll in a tight loop — check,
-   then wait for the next natural turn.
-4. When finished, call `mcp__zcac__task_list` and summarize: each task's kind, status,
-   attempts and one-line summary. Also call `mcp__zcac__get_messages` to check any
-   inter-agent communications (handoffs, questions, findings).
-5. If the run failed, show the failing task's error from the events tail and suggest a
-   fix or a retry.
+   - `pipeline` (default for non-trivial tasks): planner decomposes → implement/test → review.
+   - `single`: one coder task (trivial changes only).
+2. Call `mcp__zcac__cluster_create` with the full task text and chosen `mode`.
+3. Poll `mcp__zcac__cluster_status` until `completed` or `failed`.
+4. When finished, call `mcp__zcac__task_list` and summarize results.
+   Also call `mcp__zcac__get_messages` to check inter-agent communications.
 
-You can also use the messaging tools to facilitate agent collaboration:
-- `mcp__zcac__send_message` — send a message on behalf of an agent (policy-enforced)
-- `mcp__zcac__get_messages` — retrieve messages (filter by agent/thread/task)
-- `mcp__zcac__reply_message` — reply to a specific message (auto-joins thread)
-- `mcp__zcac__get_thread` — view a full conversation thread
+**Messaging** (agent collaboration):
+- `send_message` / `get_messages` / `reply_message` / `get_thread` — structured agent communication
 
-Do not re-implement the task yourself — the cluster's workers do the work. Your job is to
-create the run, monitor it, and report the outcome.
+**Configuration:**
+- `list_models` — enumerate all available models with reasoning levels
+- `configure` — get/set role models, default model, isolation, concurrency at runtime
+
+Do not re-implement the task yourself — the cluster's workers do the work.
 
 User task: $ARGUMENTS
 
