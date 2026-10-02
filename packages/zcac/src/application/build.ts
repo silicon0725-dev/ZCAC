@@ -14,6 +14,7 @@ import { GraphService } from "./graph-service.js";
 import { PipelineService } from "./pipeline.js";
 import { SupervisorService } from "./supervisor.js";
 import { MessageBus } from "./message-bus.js";
+import { AgentCommunicationService } from "./agent-communication.js";
 import { DEFAULT_COMMUNICATION_POLICY, type CommunicationPolicy } from "../domain/message/agent-message.js";
 import { SqliteMessageRepository } from "../adapters/sqlite/message-repository.js";
 import { ExponentialBackoffGovernor } from "./rate-governor.js";
@@ -62,6 +63,8 @@ export interface ZcacOptions {
   roleModels?: Readonly<Record<string, string>>;
   /** 通信策略(默认 DEFAULT_COMMUNICATION_POLICY)。 */
   communicationPolicy?: CommunicationPolicy;
+  /** Layer 2 续接链最大深度(默认 2)。 */
+  maxContinuationDepth?: number;
   governorMaxCooldownMs?: number;
   /** 计划无 review 时是否追加终审;默认 true。 */
   pipelineAutoReview?: boolean;
@@ -88,6 +91,7 @@ export interface ZcacApp {
   pipeline?: PipelineService;
   supervisor?: SupervisorService;
   messageBus?: MessageBus;
+  agentCommunication?: AgentCommunicationService;
   worktrees?: WorktreeService;
   artifacts: SqliteArtifactRepository;
   worktreeRepo: SqliteWorktreeRepository;
@@ -157,7 +161,19 @@ export async function buildZcac(options: ZcacOptions): Promise<ZcacApp> {
     messages: messageRepo,
     bus,
     clock,
-    ...(options.communicationPolicy ? { policy: options.communicationPolicy } : {}),
+    // 无显式策略时用默认(coder 可发 explorer/tester/planner 等);
+    // 空对象会阻塞一切通信(实测踩过)。
+    policy: options.communicationPolicy ?? DEFAULT_COMMUNICATION_POLICY,
+  });
+  const agentCommunication = new AgentCommunicationService({
+    messageBus,
+    taskService,
+    tasks,
+    runs,
+    clock,
+    ...(options.maxContinuationDepth !== undefined
+      ? { maxContinuationDepth: options.maxContinuationDepth }
+      : {}),
   });
 
   const pipelineOn = options.pipeline !== false;
@@ -171,6 +187,7 @@ export async function buildZcac(options: ZcacOptions): Promise<ZcacApp> {
         ...(options.pipelineAutoReview === false ? { autoReview: false } : {}),
         ...(supervisor ? { supervisor } : {}),
     ...(messageBus ? { messageBus } : {}),
+    ...(agentCommunication ? { agentCommunication } : {}),
       })
     : undefined;
   pipeline?.attach();
@@ -227,6 +244,8 @@ export async function buildZcac(options: ZcacOptions): Promise<ZcacApp> {
     ...(governor ? { governor } : {}),
     ...(options.roleModels ? { roleModels: options.roleModels } : {}),
     ...(messageBus ? { messageBus } : {}),
+    ...(agentCommunication ? { agentCommunication } : {}),
+    ...(agentCommunication ? { agentCommunication } : {}),
   });
 
   return {
@@ -244,6 +263,7 @@ export async function buildZcac(options: ZcacOptions): Promise<ZcacApp> {
     ...(pipeline ? { pipeline } : {}),
     ...(supervisor ? { supervisor } : {}),
     ...(messageBus ? { messageBus } : {}),
+    ...(agentCommunication ? { agentCommunication } : {}),
     ...(worktrees ? { worktrees } : {}),
     artifacts,
     worktreeRepo,

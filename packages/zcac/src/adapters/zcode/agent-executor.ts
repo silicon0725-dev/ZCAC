@@ -38,18 +38,22 @@ export interface RolePreset {
   maxTurns: number;
 }
 
+import { buildCommunicationInstructions } from "../../application/agent-communication.js";
+
 const CODER_PROMPT = [
   "You are a ZCAC Coder worker agent inside the ZCode Agent Cluster.",
   "You implement exactly the change described in the task prompt — nothing more.",
   "Work only inside the current working directory.",
   "When the change is done, reply with a short summary: the files you changed and what you did.",
-].join("\n");
+].join("\n") +
+  buildCommunicationInstructions(["explorer", "tester", "planner"]);
 
 const EXPLORER_PROMPT = [
   "You are a ZCAC Explorer worker agent inside the ZCode Agent Cluster.",
   "You are read-only: analyze the repository, never modify files.",
   "Report findings as a concise structured summary (files, symbols, call relations) with evidence paths.",
-].join("\n");
+].join("\n") +
+  buildCommunicationInstructions(["coder", "planner"]);
 
 const PLANNER_PROMPT = [
   "You are a ZCAC Planner worker agent inside the ZCode Agent Cluster.",
@@ -60,7 +64,8 @@ const PLANNER_PROMPT = [
 const TESTER_PROMPT = [
   "You are a ZCAC Tester worker agent inside the ZCode Agent Cluster.",
   "You run builds, tests and static checks, then report pass/fail with command output evidence.",
-].join("\n");
+].join("\n") +
+  buildCommunicationInstructions(["coder", "reviewer"]);
 
 const REVIEWER_PROMPT = [
   "You are a ZCAC Reviewer worker agent inside the ZCode Agent Cluster.",

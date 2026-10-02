@@ -17,6 +17,7 @@ import type { GraphService } from "./graph-service.js";
 import type { TaskService } from "./task-service.js";
 import type { WorktreeService } from "./worktree-service.js";
 import type { MessageBus } from "./message-bus.js";
+import type { AgentCommunicationService } from "./agent-communication.js";
 
 export type WorkspaceIsolation = "shared" | "worktree";
 
@@ -48,6 +49,8 @@ export interface SchedulerDeps {
   roleModels?: Readonly<Record<string, string>>;
   /** Agent 通信总线;注入后任务完成自动生成 handoff,下游 prompt 注入上游上下文。 */
   messageBus?: MessageBus;
+  /** Layer 2:@MSG 解析 → 子任务/续接任务创建。 */
+  agentCommunication?: AgentCommunicationService;
 }
 
 export interface DrainOptions {
@@ -271,6 +274,19 @@ export class Scheduler {
             );
           } catch {
             // handoff 生成失败不影响任务结果
+          }
+        }
+        // Layer 2:解析 @@MSG → 子任务/续接;answer task → 回写 MessageBus
+        if (this.deps.agentCommunication) {
+          try {
+            const completedTask = this.deps.tasks.get(task.id) ?? { ...task, status: "succeeded", output };
+            if (completedTask.input.metadata?.communication) {
+              this.deps.agentCommunication.onAnswerTaskCompleted(completedTask);
+            } else {
+              this.deps.agentCommunication.onTaskCompleted(completedTask);
+            }
+          } catch {
+            // 通信解析失败不影响任务结果
           }
         }
       } else {
