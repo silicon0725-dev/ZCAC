@@ -15,6 +15,7 @@ import { PipelineService } from "./pipeline.js";
 import { SupervisorService } from "./supervisor.js";
 import { MessageBus } from "./message-bus.js";
 import { AgentCommunicationService } from "./agent-communication.js";
+import { EventMessageBridge } from "./event-message-bridge.js";
 import { DEFAULT_COMMUNICATION_POLICY, type CommunicationPolicy } from "../domain/message/agent-message.js";
 import { SqliteMessageRepository } from "../adapters/sqlite/message-repository.js";
 import { ExponentialBackoffGovernor } from "./rate-governor.js";
@@ -165,6 +166,9 @@ export async function buildZcac(options: ZcacOptions): Promise<ZcacApp> {
     // 空对象会阻塞一切通信(实测踩过)。
     policy: options.communicationPolicy ?? DEFAULT_COMMUNICATION_POLICY,
   });
+  const eventMessageBridge = new EventMessageBridge(messageBus);
+  bus.subscribe((event) => eventMessageBridge.onEvent(event));
+
   const agentCommunication = new AgentCommunicationService({
     messageBus,
     taskService,

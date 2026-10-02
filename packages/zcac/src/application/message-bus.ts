@@ -54,8 +54,10 @@ export class MessageBus {
    * 返回完整 AgentMessage;被拒绝时抛 CommunicationDeniedError。
    */
   send(input: SendMessageInput): AgentMessage {
-    // 系统生成的 handoff 消息免检(agent 通信策略管 agent,不管系统)
-    if (input.type !== "handoff") {
+    // 系统生成的消息(handoff / 系统广播)免检——agent 通信策略管 agent,不管系统。
+    // fromAgent="system" 一律免检,不受策略/限速约束。
+    const isSystem = input.fromAgent === "system" || input.type === "handoff";
+    if (!isSystem) {
       const policy = this.#policy[input.fromAgent];
       if (!isSendAllowed(this.#policy, input.fromAgent, input.toAgent)) {
         throw new CommunicationDeniedError(
@@ -67,7 +69,7 @@ export class MessageBus {
         );
       }
 
-      // rate-limit: per task per sender(handoff 也不计入)
+      // rate-limit: per task per sender
       if (input.taskId) {
         const key = `${input.runId}:${input.taskId}:${input.fromAgent}`;
         const count = this.#sentCount.get(key) ?? 0;
