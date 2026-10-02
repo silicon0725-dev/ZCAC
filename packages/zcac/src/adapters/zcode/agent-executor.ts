@@ -38,7 +38,11 @@ export interface RolePreset {
   maxTurns: number;
 }
 
-import { buildCommunicationInstructions } from "../../application/agent-communication.js";
+import {
+  buildCommunicationInstructions,
+  buildAgentDiscoveryInstructions,
+} from "../../application/agent-communication.js";
+import { createDefaultCapabilityRegistry } from "../../domain/agent/agent-pool.js";
 
 const CODER_PROMPT = [
   "You are a ZCAC Coder worker agent inside the ZCode Agent Cluster.",

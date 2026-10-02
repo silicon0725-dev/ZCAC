@@ -171,6 +171,7 @@ export async function buildZcac(options: ZcacOptions): Promise<ZcacApp> {
     tasks,
     runs,
     clock,
+    registry,
     ...(options.maxContinuationDepth !== undefined
       ? { maxContinuationDepth: options.maxContinuationDepth }
       : {}),

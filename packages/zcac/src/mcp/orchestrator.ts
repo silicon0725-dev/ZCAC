@@ -491,6 +491,35 @@ async function main(): Promise<void> {
   );
 
   // -------------------------------------------------------------------------
+  // Agent Discovery (ZCAC-0014)
+  // -------------------------------------------------------------------------
+
+  registerZcacTool(
+    "list_agents",
+    {
+      description:
+        "List all available agent roles with their capabilities, quotas, and current pool status. Use this to understand which agents the cluster can dispatch.",
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        const roles = app.registry.list();
+        return ok({
+          count: roles.length,
+          agents: roles.map((role) => ({
+            role: role.role,
+            capabilities: role.capabilities,
+            maxConcurrent: role.defaultQuota,
+            currentlyBusy: app.pool.busyCount(role.role),
+          })),
+        });
+      } catch (error) {
+        return err(error);
+      }
+    },
+  );
+
+  // -------------------------------------------------------------------------
   // Settings: list_models / configure
   // -------------------------------------------------------------------------
 
