@@ -64,6 +64,8 @@ interface WorkerSession {
    * 停止的位置继续消费,不会重放旧 turn.completed 造成假完成。
    */
   eventCursor: number;
+  /** 防同一 session 并发多个 in-flight session/events RPC。 */
+  pollInFlight: boolean;
 }
 
 interface Turn {
@@ -315,6 +317,7 @@ export class ProtocolAgentExecutor implements AgentExecutor {
       role: request.role,
       poisoned: false,
       eventCursor: 0,
+      pollInFlight: false,
     };
     worker.sessions.set(workspaceKey, session);
     return session;
@@ -371,6 +374,11 @@ export class ProtocolAgentExecutor implements AgentExecutor {
       console.error("[proto] worker exit code=" + code + " signal=" + signal + " stderr=" + worker.lastStderr.slice(-300));
       worker.alive = false;
       this.#crashCount += 1;
+      // reject 全部 pending rpc(P1: 否则挂到 60s timeout)
+      for (const [id, resolver] of [...worker.pendingRpc]) {
+        worker.pendingRpc.delete(id);
+        resolver({ id, error: { code: -32000, message: "worker exited" } });
+      }
       // 该进程全部 session 的活动 turn 结算为 failed(P0-3: 崩溃标记)
       for (const session of worker.sessions.values()) {
         if (session.activeTurn && !session.activeTurn.settled) {
@@ -406,8 +414,14 @@ export class ProtocolAgentExecutor implements AgentExecutor {
 
   #killWorker(worker: WorkerProcess): void {
     worker.alive = false;
-    for (const poll of worker.polls) poll.stop();
+    // 复制后遍历:poll.stop() 会从 worker.polls 中自删,直接遍历会跳过条目
+    for (const poll of [...worker.polls]) poll.stop();
     worker.polls = [];
+    // reject 全部 pending rpc(P1: 否则挂到 60s timeout)
+    for (const [id, resolver] of [...worker.pendingRpc]) {
+      worker.pendingRpc.delete(id);
+      resolver({ id, error: { code: -32000, message: "worker process killed" } });
+    }
     if (!worker.child.killed) worker.child.kill();
     this.#processes.delete(worker);
     this.#evictWorkerFromPools(worker);
@@ -567,8 +581,9 @@ export class ProtocolAgentExecutor implements AgentExecutor {
     session: WorkerSession,
     turn: Turn,
   ): Promise<void> {
-    if (turn.settled || !worker.alive) return;
+    if (turn.settled || !worker.alive || session.pollInFlight) return;
     try {
+      session.pollInFlight = true;
       const afterSeq = session.eventCursor;
       const response = await this.#rpc(worker, "session/events", {
         sessionId: session.sessionId,
@@ -620,7 +635,9 @@ export class ProtocolAgentExecutor implements AgentExecutor {
       session.eventCursor = maxSeq;
       return;
     } catch {
-      return; // 轮询失败:下一轮再试;崩溃由 exit 处理
+      // 轮询失败(rpc reject/进程退出):下一轮再试;崩溃由 exit 处理
+    } finally {
+      session.pollInFlight = false;
     }
   }
 

@@ -192,7 +192,7 @@ GLM-5.3 / GLM-5.3-Flash / MiMo / (any OpenAI-compatible provider)
 
 ```bash
 # Inside zcode-repo with packages/zcac present:
-pnpm --filter zcac test                    # 94 unit tests
+pnpm --filter zcac test                    # 112 unit tests
 pnpm --filter zcac build                   # compile + bundle orchestrator
 
 # E2E tests (real GLM, costs tokens):
