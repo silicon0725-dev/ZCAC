@@ -1,10 +1,12 @@
 /**
- * ZCAC Phase 13 — ProtocolAgentExecutor 生命周期测试(fake child process)。
+ * ZCAC Phase 13 — ProtocolAgentExecutor 生命周期测试(真实协议路径)。
  *
- * 覆盖审查矩阵:
- *   单 Worker 单 Task / 池复用 / 不同 workspace 不串 session /
- *   worker crash → task failed / timeout → session 污染 /
- *   stop → 无幽灵 TurnComplete / late event 丢弃
+ * 全部通过 session/events 轮询驱动(与真实 zcode app-server 一致):
+ *   session/create → session/send → session/events(afterSeq=cursor)
+ *   → {seq, kind:"turn.completed", payload:{response}}
+ *
+ * 覆盖审查矩阵:单任务 / 池复用+游标 / workspace 隔离 /
+ * crash / timeout+late-event / stop / send-failure / poll cleanup。
  */
 
 import assert from "node:assert/strict";
@@ -17,59 +19,138 @@ import { ProtocolAgentExecutor } from "../src/adapters/protocol/agent-executor.j
 import type { AgentHandle, AgentLaunchRequest } from "../src/ports/agent-executor.js";
 
 // ---------------------------------------------------------------------------
-// FakeChild:模拟 app-server 子进程的可编程 stdout/stdin
+// EventStoreFake:按真实协议模拟 session/events 轮询
 // ---------------------------------------------------------------------------
 
-interface FakeChildController {
-  child: EventEmitter & { stdin: { write: (s: string) => void; killed: boolean }; killed: boolean };
-  /** 模拟子进程向 stdout 写一帧 NDJSON。 */
-  emitLine: (json: string) => void;
-  /** 模拟子进程 exit。 */
-  emitExit: () => void;
-  /** 收到的 stdin 写入(解析后的请求列表)。 */
-  readonly received: Array<{ id: number; method: string; params?: unknown }>;
+interface StoreEvent {
+  seq: number;
+  kind: string;
+  payload?: Record<string, unknown>;
 }
 
-function createFakeChild(): FakeChildController {
-  const received: Array<{ id: number; method: string; params?: unknown }> = [];
-  const child = new EventEmitter() as EventEmitter & {
+interface FakeController {
+  child: EventEmitter & {
     stdin: { write: (s: string) => void; killed: boolean };
     stdout: EventEmitter;
     killed: boolean;
+    kill: () => void;
   };
-  let exitEmitted = false;
-  child.stdout = new EventEmitter();
-  child.stdin = {
-    write: (line: string) => {
-      try {
-        received.push(JSON.parse(line));
-      } catch { /* ignore */ }
-    },
-    get killed() {
-      return child.killed;
-    },
-  };
-  child.killed = false;
-  const api = {
-    child,
-    received,
-    emitLine(json: string) {
-      // 写入 stdout(executor 监听 child.stdout 的 data 事件)
-      child.stdout.emit("data", Buffer.from(`${json}\n`, "utf8"));
-    },
-    emitExit() {
-      if (exitEmitted) return;
-      exitEmitted = true;
+  emitLine: (json: string) => void;
+  emitExit: () => void;
+  readonly received: Array<{ id: string; method: string; params?: unknown }>;
+  readonly afterSeqLog: number[];
+}
+
+interface EventStoreFake {
+  spawn: typeof import("node:child_process").spawn;
+  controllers: FakeController[];
+  emit: (kind: string, payload?: Record<string, unknown>) => number;
+}
+
+function createEventStoreFake(
+  controllers: FakeController[],
+  opts?: { sendBehavior?: "accept" | "error" },
+): EventStoreFake {
+  const store: { events: StoreEvent[]; nextSeq: number } = { events: [], nextSeq: 1 };
+  let sessionCounter = 0;
+
+  const fn = () => {
+    const received: Array<{ id: string; method: string; params?: unknown }> = [];
+    const afterSeqLog: number[] = [];
+    const child = new EventEmitter() as FakeController["child"];
+    child.stdout = new EventEmitter();
+    child.killed = false;
+
+    const respond = (frame: Record<string, unknown>): void => {
+      setImmediate(() => {
+        child.stdout.emit("data", Buffer.from(`${JSON.stringify(frame)}\n`, "utf8"));
+      });
+    };
+
+    child.stdin = {
+      write: (line: string) => {
+        let parsed: { id: string; method: string; params?: Record<string, unknown> };
+        try {
+          parsed = JSON.parse(line);
+        } catch {
+          return;
+        }
+        received.push(parsed);
+
+        if (parsed.method === "session/create") {
+          sessionCounter += 1;
+          respond({
+            id: parsed.id,
+            result: { session: { sessionId: `sess-${sessionCounter}` } },
+          });
+          return;
+        }
+
+        if (parsed.method === "session/events") {
+          const afterSeq = typeof parsed.params?.afterSeq === "number" ? parsed.params.afterSeq : 0;
+          afterSeqLog.push(afterSeq);
+          const events = store.events.filter((e) => e.seq > afterSeq).slice(0, 100);
+          respond({ id: parsed.id, result: { events } });
+          return;
+        }
+
+        if (parsed.method === "session/send") {
+          if (opts?.sendBehavior === "error") {
+            respond({ id: parsed.id, error: { code: -32010, message: "send rejected" } });
+          } else {
+            respond({
+              id: parsed.id,
+              result: { accepted: true, sessionId: parsed.params?.sessionId },
+            });
+          }
+          return;
+        }
+
+        if (parsed.method === "session/requestRuntimePreferences") {
+          respond({
+            id: parsed.id,
+            result: {
+              nativeSearchEnhancementsEnabled: true,
+              memoryEnabled: false,
+              askUserQuestionAutoResolutionEnabled: true,
+            },
+          });
+          return;
+        }
+
+        respond({ id: parsed.id, error: { code: -32601, message: "unhandled" } });
+      },
+      killed: false,
+    };
+
+    child.kill = () => {
+      child.killed = true;
       child.emit("exit", 0);
+      return true;
+    };
+
+    const control: FakeController = {
+      child,
+      emitLine: (json: string) => {
+        child.stdout.emit("data", Buffer.from(`${json}\n`, "utf8"));
+      },
+      emitExit: () => child.emit("exit", 0),
+      received,
+      afterSeqLog,
+    };
+    controllers.push(control);
+    return child;
+  };
+
+  return {
+    spawn: fn as unknown as typeof import("node:child_process").spawn,
+    controllers,
+    emit(kind: string, payload?: Record<string, unknown>): number {
+      const seq = store.nextSeq++;
+      store.events.push({ seq, kind, payload });
+      return seq;
     },
   };
-  // kill() 触发 exit(fake 不真退出进程)
-  (child as unknown as { kill: () => void }).kill = () => {
-    child.killed = true;
-    api.emitExit();
-    return true;
-  };
-  return api;
 }
 
 function req(overrides?: Partial<AgentLaunchRequest>): AgentLaunchRequest {
@@ -81,161 +162,134 @@ function req(overrides?: Partial<AgentLaunchRequest>): AgentLaunchRequest {
   };
 }
 
-/** 标准 scripted fake:session/create → 返回 sessionId;TurnComplete 由测试控制。 */
-function scriptedSpawn(
-  controllers: FakeChildController[],
-): typeof import("node:child_process").spawn {
-  return ((() => {
-    const control = createFakeChild();
-    controllers.push(control);
-    // 自动应答 session/create(直接写 stdout)
-    // sessionId 全局唯一(与真实 zcode 一致;per-process 计数会撞名造成假阳性)
-    let createSeq = 0;
-    const originalWrite = control.child.stdin.write.bind(control.child.stdin);
-    control.child.stdin.write = (line: string) => {
-      originalWrite(line);
-      try {
-        const parsed = JSON.parse(line) as { id: number; method: string };
-        if (parsed.method === "session/create") {
-          createSeq += 1;
-          const id = parsed.id;
-          const response = JSON.stringify({ id, result: { sessionId: `sess-${controllers.indexOf(control) + 1}-${createSeq}` } });
-          setImmediate(() => {
-            control.emitLine(response);
-          });
-        }
-      } catch { /* ignore */ }
-    };
-    return control.child as unknown as ReturnType<typeof import("node:child_process").spawn>;
-  }) as unknown) as typeof import("node:child_process").spawn;
-}
-
-async function drainMicrotasks(): Promise<void> {
+async function drain(): Promise<void> {
   await new Promise((resolve) => setImmediate(resolve));
 }
 
-describe("ProtocolAgentExecutor lifecycle (fake child)", () => {
-  it("single worker single task: create → send → TurnComplete → completed", async (t) => {
-    const dir = await mkdtemp(join(tmpdir(), "zcac-p13-"));
-    t.after(() => rm(dir, { recursive: true, force: true }).catch(() => undefined));
+async function waitFor(condition: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error("waitFor timed out");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
 
-    const controllers: FakeChildController[] = [];
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+describe("ProtocolAgentExecutor (real session/events polling)", () => {
+  it("single task: create → send → events polling → turn.completed → completed", async (t) => {
+    const dir = await mkdtemp(join(tmpdir(), "zcac-rl-"));
+    t.after(() => rm(dir, { recursive: true, force: true }).catch(() => undefined));
+    const controllers: FakeController[] = [];
+    const fake = createEventStoreFake(controllers);
     const executor = new ProtocolAgentExecutor({
-      spawnOverride: scriptedSpawn(controllers),
+      spawnOverride: fake.spawn,
       cliBundlePath: "fake/zcode.cjs",
-      taskTimeoutMs: 5_000,
+      taskTimeoutMs: 10_000,
+      pollIntervalMs: 30,
     });
 
     const handle = await executor.launch(req());
-    await drainMicrotasks();
-
-    // session/create + session/send 已发出
-    const methods = controllers[0]!.received.map((r) => r.method);
-    assert.ok(methods.includes("session/create"), methods.join(","));
-    assert.ok(methods.includes("session/send"));
-
-    // 模拟 TurnComplete
-    controllers[0]!.emitLine(
-      JSON.stringify({ method: "session/TurnComplete", params: { parts: [{ type: "text", text: "work done" }] } }),
-    );
+    await drain();
+    fake.emit("turn.started");
+    fake.emit("turn.completed", { response: "work done" });
     const result = await executor.wait(handle);
     assert.equal(result.status, "completed");
     assert.equal(result.response, "work done");
-    assert.ok(result.sessionId.startsWith("sess-1-"), result.sessionId);
     await executor.dispose();
   });
 
-  it("pool reuse: second task on same workspace reuses process+session", async (t) => {
-    const dir = await mkdtemp(join(tmpdir(), "zcac-p13b-"));
+  it("pool reuse + event cursor: Task B polls from Task A cursor, gets own response", async (t) => {
+    const dir = await mkdtemp(join(tmpdir(), "zcac-rl2-"));
     t.after(() => rm(dir, { recursive: true, force: true }).catch(() => undefined));
-
-    const controllers: FakeChildController[] = [];
+    const controllers: FakeController[] = [];
+    const fake = createEventStoreFake(controllers);
     const executor = new ProtocolAgentExecutor({
-      spawnOverride: scriptedSpawn(controllers),
+      spawnOverride: fake.spawn,
       cliBundlePath: "fake/zcode.cjs",
-      taskTimeoutMs: 5_000,
+      taskTimeoutMs: 10_000,
+      pollIntervalMs: 30,
     });
 
-    // Task 1 完成
-    const h1 = await executor.launch(req());
-    await drainMicrotasks();
-    controllers[0]!.emitLine(
-      JSON.stringify({ method: "session/TurnComplete", params: { parts: [{ type: "text", text: "one" }] } }),
-    );
+    // Task A
+    const h1 = await executor.launch(req({ prompt: "A" }));
+    await drain();
+    fake.emit("turn.started");
+    fake.emit("turn.completed", { response: "A-done" });
     const r1 = await executor.wait(h1);
-    assert.equal(r1.status, "completed");
-    assert.equal(executor.processCount, 1, "process kept alive for reuse");
+    assert.equal(r1.response, "A-done");
+    // 核心断言:Task B 复用同一 session 时必须从 Task A 停止的位置继续轮询。
+    // 如果游标失效(Task B 重放 A 的 turn.completed),r2.response 会是 "A-done"。
 
-    // Task 2 同 workspace:复用(不新 spawn)
-    const h2 = await executor.launch(req({ prompt: "second task" }));
-    await drainMicrotasks();
-    assert.equal(controllers.length, 1, "no new process spawned");
-    assert.equal(h2.sessionId, h1.sessionId, "same session reused");
-
-    controllers[0]!.emitLine(
-      JSON.stringify({ method: "session/TurnComplete", params: { parts: [{ type: "text", text: "two" }] } }),
-    );
+    // Task B: same workspace → same session; B 自己的 completed
+    fake.emit("turn.started");
+    fake.emit("turn.completed", { response: "B-done" });
+    const h2 = await executor.launch(req({ prompt: "B" }));
+    await drain();
     const r2 = await executor.wait(h2);
-    assert.equal(r2.response, "two");
+    assert.equal(r2.response, "B-done", `cursor broken: got "${r2.response}"`);
+    assert.equal(h2.sessionId, h1.sessionId, "session reused");
     await executor.dispose();
   });
 
-  it("different workspaces NEVER share session (isolation)", async (t) => {
-    const dir = await mkdtemp(join(tmpdir(), "zcac-p13c-"));
+  it("different workspaces NEVER share session", async (t) => {
+    const dir = await mkdtemp(join(tmpdir(), "zcac-rl3-"));
     t.after(() => rm(dir, { recursive: true, force: true }).catch(() => undefined));
-
-    const controllers: FakeChildController[] = [];
+    const controllers: FakeController[] = [];
+    const fake = createEventStoreFake(controllers);
     const executor = new ProtocolAgentExecutor({
-      spawnOverride: scriptedSpawn(controllers),
+      spawnOverride: fake.spawn,
       cliBundlePath: "fake/zcode.cjs",
-      taskTimeoutMs: 5_000,
+      taskTimeoutMs: 10_000,
+      pollIntervalMs: 30,
     });
 
-    const h1 = await executor.launch(req({ workingDirectory: "/ws/worktree-A" }));
-    await drainMicrotasks();
-    controllers[0]!.emitLine(
-      JSON.stringify({ method: "session/TurnComplete", params: { parts: [{ type: "text", text: "a" }] } }),
-    );
+    const h1 = await executor.launch(req({ workingDirectory: "/ws/wt-A" }));
+    await drain();
+    fake.emit("turn.started");
+    fake.emit("turn.completed", { response: "a" });
     await executor.wait(h1);
 
-    const h2 = await executor.launch(req({ workingDirectory: "/ws/worktree-B" }));
-    await drainMicrotasks();
-    assert.notEqual(h2.sessionId, h1.sessionId, "sessions isolated per workspace");
-    assert.equal(controllers.length, 2, "new process for new workspace");
+    const h2 = await executor.launch(req({ workingDirectory: "/ws/wt-B" }));
+    await drain();
+    assert.notEqual(h2.sessionId, h1.sessionId);
+    assert.equal(controllers.length, 2);
     await executor.dispose();
   });
 
   it("worker crash: pending task → failed(executor_error)", async (t) => {
-    const dir = await mkdtemp(join(tmpdir(), "zcac-p13d-"));
+    const dir = await mkdtemp(join(tmpdir(), "zcac-rl4-"));
     t.after(() => rm(dir, { recursive: true, force: true }).catch(() => undefined));
-
-    const controllers: FakeChildController[] = [];
+    const controllers: FakeController[] = [];
+    const fake = createEventStoreFake(controllers);
     const executor = new ProtocolAgentExecutor({
-      spawnOverride: scriptedSpawn(controllers),
+      spawnOverride: fake.spawn,
       cliBundlePath: "fake/zcode.cjs",
-      taskTimeoutMs: 5_000,
+      taskTimeoutMs: 10_000,
+      pollIntervalMs: 30,
     });
 
     const handle = await executor.launch(req());
-    await drainMicrotasks();
-    // 模拟子进程崩溃
+    await drain();
     controllers[0]!.emitExit();
-
     const result = await executor.wait(handle);
     assert.equal(result.status, "failed");
     assert.match(result.error ?? "", /exited unexpectedly/);
     await executor.dispose();
   });
 
-  it("timeout: task failed + session poisoned (late TurnComplete ignored)", async (t) => {
-    const dir = await mkdtemp(join(tmpdir(), "zcac-p13e-"));
+  it("timeout: task failed + late events ignored", async (t) => {
+    const dir = await mkdtemp(join(tmpdir(), "zcac-rl5-"));
     t.after(() => rm(dir, { recursive: true, force: true }).catch(() => undefined));
-
-    const controllers: FakeChildController[] = [];
+    const controllers: FakeController[] = [];
+    const fake = createEventStoreFake(controllers);
     const executor = new ProtocolAgentExecutor({
-      spawnOverride: scriptedSpawn(controllers),
+      spawnOverride: fake.spawn,
       cliBundlePath: "fake/zcode.cjs",
-      taskTimeoutMs: 50, // 极短超时
+      taskTimeoutMs: 50,
+      pollIntervalMs: 30,
     });
 
     const handle = await executor.launch(req());
@@ -243,42 +297,81 @@ describe("ProtocolAgentExecutor lifecycle (fake child)", () => {
     assert.equal(result.status, "failed");
     assert.match(result.error ?? "", /timeout/);
 
-    // late TurnComplete 到达:不得产生任何新结果/新任务污染
+    // late turn.completed → 丢弃
+    fake.emit("turn.completed", { response: "late ghost" });
+    await drain();
     const spawnCountBefore = controllers.length;
-    controllers[0]!.emitLine(
-      JSON.stringify({ method: "session/TurnComplete", params: { parts: [{ type: "text", text: "late ghost" }] } }),
-    );
-    await drainMicrotasks();
-    assert.equal(controllers.length, spawnCountBefore, "poisoned worker killed, no new spawns");
-    // executor 仍可用:新任务走全新 session
-    const h2 = await executor.launch(req({ prompt: "fresh task" }));
-    await drainMicrotasks();
-    assert.notEqual(h2.sessionId, handle.sessionId, "fresh session after poisoning");
+    const h2 = await executor.launch(req({ prompt: "fresh" }));
+    await drain();
+    assert.notEqual(h2.sessionId, handle.sessionId, "fresh session after poison");
+    assert.equal(controllers.length, spawnCountBefore + 1, "exactly one new spawn for fresh task");
     await executor.dispose();
   });
 
-  it("stop: task cancelled + late TurnComplete ignored (no ghost)", async (t) => {
-    const dir = await mkdtemp(join(tmpdir(), "zcac-p13f-"));
+  it("stop: cancelled + ghost events ignored", async (t) => {
+    const dir = await mkdtemp(join(tmpdir(), "zcac-rl6-"));
     t.after(() => rm(dir, { recursive: true, force: true }).catch(() => undefined));
-
-    const controllers: FakeChildController[] = [];
+    const controllers: FakeController[] = [];
+    const fake = createEventStoreFake(controllers);
     const executor = new ProtocolAgentExecutor({
-      spawnOverride: scriptedSpawn(controllers),
+      spawnOverride: fake.spawn,
       cliBundlePath: "fake/zcode.cjs",
-      taskTimeoutMs: 5_000,
+      taskTimeoutMs: 10_000,
+      pollIntervalMs: 30,
     });
 
     const handle = await executor.launch(req());
-    await drainMicrotasks();
+    await drain();
     await executor.stop(handle);
     const result = await executor.wait(handle);
     assert.equal(result.status, "cancelled");
+    fake.emit("turn.completed", { response: "ghost" });
+    await drain();
+    await executor.dispose();
+  });
 
-    // ghost TurnComplete 到达:无活动 turn,丢弃
-    controllers[0]!.emitLine(
-      JSON.stringify({ method: "session/TurnComplete", params: { parts: [{ type: "text", text: "ghost" }] } }),
-    );
-    await drainMicrotasks(); // 无异常即通过
+  it("poll cleanup: 8 reuses → activePollCount stays 0", async (t) => {
+    const dir = await mkdtemp(join(tmpdir(), "zcac-rl7-"));
+    t.after(() => rm(dir, { recursive: true, force: true }).catch(() => undefined));
+    const controllers: FakeController[] = [];
+    const fake = createEventStoreFake(controllers);
+    const executor = new ProtocolAgentExecutor({
+      spawnOverride: fake.spawn,
+      cliBundlePath: "fake/zcode.cjs",
+      taskTimeoutMs: 10_000,
+      pollIntervalMs: 30,
+    });
+
+    for (let i = 1; i <= 8; i += 1) {
+      const handle = await executor.launch(req({ prompt: `task ${i}` }));
+      await drain();
+      fake.emit("turn.started");
+      fake.emit("turn.completed", { response: `done-${i}` });
+      const result = await executor.wait(handle);
+      assert.equal(result.status, "completed", `task ${i}`);
+      assert.equal(executor.activePollCount, 0, `after task ${i}`);
+    }
+    await executor.dispose();
+  });
+
+  it("session/send rpc error → task failed + session poisoned", async (t) => {
+    const dir = await mkdtemp(join(tmpdir(), "zcac-rl8-"));
+    t.after(() => rm(dir, { recursive: true, force: true }).catch(() => undefined));
+    const controllers: FakeController[] = [];
+    const fake = createEventStoreFake(controllers, { sendBehavior: "error" });
+    const executor = new ProtocolAgentExecutor({
+      spawnOverride: fake.spawn,
+      cliBundlePath: "fake/zcode.cjs",
+      taskTimeoutMs: 10_000,
+      pollIntervalMs: 30,
+    });
+
+    const handle = await executor.launch(req());
+    const result = await executor.wait(handle);
+    assert.equal(result.status, "failed");
+    assert.match(result.error ?? "", /send rejected/);
+    await drain();
+    assert.equal(executor.processCount, 0, "poisoned worker killed");
     await executor.dispose();
   });
 });

@@ -55,6 +55,33 @@ async function main(): Promise<void> {
     console.log(`[smoke] hello-protocol.txt: ${JSON.stringify(content)}`);
 
     pass = result.status === "completed" && content !== undefined && content.includes("protocol smoke works");
+
+    // ---- 第二个任务:同 workspace 复用 session(events 游标 + 池复用验证) ----
+    console.log("[smoke] task 2: same-workspace session reuse");
+    const handle2 = await executor.launch({
+      role: "coder",
+      prompt: [
+        "Create a file named second-task.txt in the current working directory,",
+        "containing exactly one line: session reuse works",
+        "End your reply with: TASK2_OK",
+      ].join("\n"),
+      workingDirectory: sandbox,
+      ...(process.env.ZCAC_MODEL ? { model: process.env.ZCAC_MODEL } : {}),
+    });
+    const result2 = await executor.wait(handle2);
+    console.log(`[smoke] task2 status: ${result2.status} session=${handle2.sessionId}`);
+    console.log(`[smoke] task2 response: ${(result2.response || result2.error || "").slice(0, 300)}`);
+    const content2 = await readFile(join(sandbox, "second-task.txt"), "utf8").catch(() => undefined);
+    console.log(`[smoke] second-task.txt: ${JSON.stringify(content2)}`);
+    const sameSession = handle2.sessionId === handle.sessionId;
+    console.log(`[smoke] session reuse: ${sameSession} (${handle.sessionId.slice(0, 16)}...)`);
+    pass =
+      pass &&
+      result2.status === "completed" &&
+      content2 !== undefined &&
+      content2.includes("session reuse works") &&
+      sameSession;
+
     console.log(pass ? "[smoke] PASS ✅" : "[smoke] FAIL ❌");
     process.exitCode = pass ? 0 : 1;
   } catch (error) {

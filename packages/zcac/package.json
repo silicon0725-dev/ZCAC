@@ -1,6 +1,6 @@
 {
   "name": "zcac",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "ZCAC (ZCode Agent Cluster) — Phase 1 Task Core: domain/application/ports + sqlite adapter + ZCode executor adapter",
