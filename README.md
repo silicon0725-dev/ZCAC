@@ -28,9 +28,10 @@ Coder: "@@TASK kind=test role=tester / Run integration tests"
 | v0.1 core (executor / task graph / scheduler / pool / lease / review / worktree / plugin) | ✅ |
 | v0.2 (pipeline / worktree+pipeline / supervisor / rate-limit backoff / multi-model) | ✅ |
 | v0.25 Agent Communication (Message Bus / handoff / task chaining / task bridge / discovery) | ✅ |
+| v0.3 ProtocolExecutor (multi-process workers / real app-server E2E / lifecycle regression) | ✅ |
 | Real-repo stress test (6 tasks) | ✅ 5/6 |
 | Kill recovery + memory stability | ✅ |
-| **94 unit tests** | ✅ 94/94 |
+| **112 unit tests** | ✅ 112/112 |
 
 ## Quick Start
 
@@ -222,9 +223,9 @@ node packages/zcac/dist/stress.cjs         # 6-task stress test
 | Dirty files in main workspace | Agent path drift (rare) | `git status`; use worktree mode |
 | Stuck in `running` after crash | Lease not expired | Wait 120s or restart ZCode |
 
-## Known Limitations (v0.25)
+## Known Limitations (v0.3)
 
-- Single-process orchestrator (ProtocolExecutor planned for v0.3 — Message Bus 传输层可替换，协议不变)
+- Orchestrator is single-process; workers can now run as child processes (ZCAC_WORKER_MODE=protocol)
 - Run status stays `failed` when Supervisor recovery succeeds (terminal immutability)
 - No native UI dropdown for model selection; `list_models` + 主模型对话提供等价体验
 - Plugin registered as inline directory (dev mode); proper distribution needs packaging
