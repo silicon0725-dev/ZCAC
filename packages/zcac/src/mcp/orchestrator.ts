@@ -90,7 +90,7 @@ async function main(): Promise<void> {
   const activeDrains = new Map<string, Promise<void>>();
 
   const server = new McpServer(
-    { name: "zcac", version: "0.1.0" },
+    { name: "zcac", version: "0.3.0" },
     { capabilities: { tools: {} } },
   );
 
@@ -419,13 +419,22 @@ async function main(): Promise<void> {
         const runId = input.runId ?? latestRunId(app);
         if (!runId) return ok({ messages: [] });
         if (!app.messageBus) throw new Error("message bus not configured");
-        const messages = app.messageBus.getMessages({
-          runId,
-          ...(input.toAgent ? { toAgent: input.toAgent } : {}),
-          ...(input.fromAgent ? { fromAgent: input.fromAgent } : {}),
-          ...(input.threadId ? { threadId: input.threadId } : {}),
-          ...(input.taskId ? { taskId: input.taskId } : {}),
-        });
+        // 只按 runId 查询(单一参数化条件);可选过滤在下方内存执行,
+        // 消除 tool input → SQL 的跨文件污点路径(安全扫描器阻塞项)。
+        const allMessages = app.messageBus.getMessages({ runId });
+        let messages = allMessages;
+        if (input.toAgent) {
+          messages = messages.filter((m) => m.toAgent === input.toAgent || m.toAgent === "*");
+        }
+        if (input.fromAgent) {
+          messages = messages.filter((m) => m.fromAgent === input.fromAgent);
+        }
+        if (input.threadId) {
+          messages = messages.filter((m) => m.threadId === input.threadId);
+        }
+        if (input.taskId) {
+          messages = messages.filter((m) => m.taskId === input.taskId);
+        }
         return ok({
           count: messages.length,
           messages: messages.map((m) => ({

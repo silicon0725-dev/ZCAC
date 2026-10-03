@@ -74,37 +74,11 @@ export class SqliteMessageRepository implements MessageRepository {
     return row ? rowToMessage(row) : undefined;
   }
 
-  query(filter: {
-    runId: string;
-    toAgent?: string;
-    fromAgent?: string;
-    threadId?: string;
-    taskId?: string;
-  }): AgentMessage[] {
-    const conditions = ["run_id = ?"];
-    const params: unknown[] = [filter.runId];
-    if (filter.toAgent) {
-      conditions.push("(to_agent = ? OR to_agent = '*')");
-      params.push(filter.toAgent);
-    }
-    if (filter.fromAgent) {
-      conditions.push("from_agent = ?");
-      params.push(filter.fromAgent);
-    }
-    if (filter.threadId) {
-      conditions.push("thread_id = ?");
-      params.push(filter.threadId);
-    }
-    if (filter.taskId) {
-      conditions.push("task_id = ?");
-      params.push(filter.taskId);
-    }
+  /** 仅 run_id 参数化查询;可选过滤在调用方内存执行。 */
+  getByRun(runId: string): AgentMessage[] {
     const rows = this.database.db
-      .prepare(
-        `SELECT * FROM zcac_messages WHERE ${conditions.join(" AND ")}
-         ORDER BY created_at ASC, id ASC`,
-      )
-      .all(...(params as string[])) as unknown as MessageRow[];
+      .prepare("SELECT * FROM zcac_messages WHERE run_id = ? ORDER BY created_at ASC, id ASC")
+      .all(runId) as unknown as MessageRow[];
     return rows.map(rowToMessage);
   }
 

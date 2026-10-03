@@ -58,6 +58,12 @@ interface WorkerSession {
   activeTurn?: Turn;
   /** 超时/崩溃/stop 后置位:worker 必须弃用。 */
   poisoned: boolean;
+  /**
+   * session/events 消费游标(P0-A)。
+   * 挂在 session 上而非 turn 局部:session 复用时 Task B 从 Task A
+   * 停止的位置继续消费,不会重放旧 turn.completed 造成假完成。
+   */
+  eventCursor: number;
 }
 
 interface Turn {
@@ -65,6 +71,8 @@ interface Turn {
   resolve: (result: AgentResult) => void;
   settled: boolean;
   timer: NodeJS.Timeout;
+  /** 该 turn 的事件轮询停止句柄(settle 时统一清理,防 interval 泄漏)。 */
+  pollStop?: () => void;
 }
 
 interface AgentHandleInternal extends AgentHandle {
@@ -80,6 +88,8 @@ export interface ProtocolExecutorOptions {
   taskTimeoutMs?: number;
   /** 注入 spawn(测试 fake 子进程)。 */
   spawnOverride?: typeof spawn;
+  /** 事件轮询间隔(默认 1500ms;测试用短间隔)。 */
+  pollIntervalMs?: number;
 }
 
 export class ProtocolAgentExecutor implements AgentExecutor {
@@ -87,6 +97,7 @@ export class ProtocolAgentExecutor implements AgentExecutor {
   readonly #env: NodeJS.ProcessEnv;
   readonly #maxIdle: number;
   readonly #taskTimeoutMs: number;
+  readonly #pollIntervalMs: number;
   readonly #spawnFn: typeof spawn;
 
   readonly #processes = new Set<WorkerProcess>();
@@ -99,6 +110,7 @@ export class ProtocolAgentExecutor implements AgentExecutor {
     this.#env = options.env ?? process.env;
     this.#maxIdle = options.maxIdlePerWorkspace ?? 2;
     this.#taskTimeoutMs = options.taskTimeoutMs ?? 10 * 60_000;
+    this.#pollIntervalMs = options.pollIntervalMs ?? 1_500;
     this.#spawnFn = options.spawnOverride ?? spawn;
     if (!options.cliBundlePath && !this.#env.ZCODE_CLI_BUNDLE) {
       throw new Error(
@@ -115,6 +127,13 @@ export class ProtocolAgentExecutor implements AgentExecutor {
 
   get crashCount(): number {
     return this.#crashCount;
+  }
+
+  /** 全部 worker 的活动轮询计数(泄漏观察)。 */
+  get activePollCount(): number {
+    let count = 0;
+    for (const worker of this.#processes) count += worker.polls.length;
+    return count;
   }
 
   // -------------------------------------------------------------------------
@@ -164,14 +183,20 @@ export class ProtocolAgentExecutor implements AgentExecutor {
 
     // ---- session/send(字段是 content,实测 ZodError 校验)----
     // stdio 协议无回合通知流(实测):Turn 完成靠 session/events 轮询。
-    let lastEventSeq = 0;
+    // 事件游标在 session.eventCursor 上:复用的 session 不重放旧事件(P0-A)。
     const poll = setInterval(() => {
-      void this.#pollEvents(worker, session, turn, lastEventSeq).then((next) => {
-        if (next > lastEventSeq) lastEventSeq = next;
-      });
-    }, 1_500);
+      void this.#pollEvents(worker, session, turn);
+    }, this.#pollIntervalMs);
     poll.unref?.();
-    worker.polls.push({ stop: () => clearInterval(poll) });
+    const pollEntry = {
+      stop: () => {
+        clearInterval(poll);
+        const index = worker.polls.indexOf(pollEntry);
+        if (index >= 0) worker.polls.splice(index, 1);
+      },
+    };
+    worker.polls.push(pollEntry);
+    turn.pollStop = pollEntry.stop;
 
     void this.#rpc(worker, "session/send", {
       sessionId: session.sessionId,
@@ -187,6 +212,8 @@ export class ProtocolAgentExecutor implements AgentExecutor {
         durationMs: Date.now() - startedAtMs,
         error: `session/send failed: ${String(error)}`,
       });
+      // P0-C: send 失败时 session 状态未知,必须污染弃用(不回池)。
+      this.#poisonSession(worker, session);
     });
 
     return handle;
@@ -287,6 +314,7 @@ export class ProtocolAgentExecutor implements AgentExecutor {
       workspaceKey,
       role: request.role,
       poisoned: false,
+      eventCursor: 0,
     };
     worker.sessions.set(workspaceKey, session);
     return session;
@@ -497,6 +525,11 @@ export class ProtocolAgentExecutor implements AgentExecutor {
       timer.unref?.();
       worker.pendingRpc.set(id, (frame) => {
         clearTimeout(timer);
+        // 协议错误帧 → reject(否则 error 响应被当成功,send-failure 不可测)
+        if (frame.error) {
+          reject(new Error(`rpc ${method} failed (${frame.error.code}): ${frame.error.message}`));
+          return;
+        }
         resolve(frame);
       });
       worker.child.stdin?.write(encodeFrame({ id, method, params }));
@@ -533,10 +566,10 @@ export class ProtocolAgentExecutor implements AgentExecutor {
     worker: WorkerProcess,
     session: WorkerSession,
     turn: Turn,
-    afterSeq: number,
-  ): Promise<number> {
-    if (turn.settled || !worker.alive) return afterSeq;
+  ): Promise<void> {
+    if (turn.settled || !worker.alive) return;
     try {
+      const afterSeq = session.eventCursor;
       const response = await this.#rpc(worker, "session/events", {
         sessionId: session.sessionId,
         afterSeq,
@@ -546,13 +579,16 @@ export class ProtocolAgentExecutor implements AgentExecutor {
         ((rpcResult(response) as { events?: Array<Record<string, unknown>> }).events ?? []);
       let maxSeq = afterSeq;
       for (const event of events) {
-        if (typeof event.sequence === "number" && event.sequence > maxSeq) {
-          maxSeq = event.sequence;
+        // 真实字段是 seq(实测:sequence 字段不存在,游标不推进会重放旧事件)
+        const seq = typeof event.seq === "number" ? event.seq : typeof event.sequence === "number" ? event.sequence : undefined;
+        if (typeof seq === "number" && seq > maxSeq) {
+          maxSeq = seq;
         }
         const kind = String(event.kind ?? event.type ?? "");
         const payload = (event.payload ?? {}) as Record<string, unknown>;
-        if (session.activeTurn !== turn || turn.settled) return maxSeq;
+        if (session.activeTurn !== turn || turn.settled) return;
         if (kind === "turn.completed") {
+          session.eventCursor = maxSeq;
           this.#settleTurn(turn, {
             status: "completed",
             agentId: turn.agentId,
@@ -563,9 +599,10 @@ export class ProtocolAgentExecutor implements AgentExecutor {
             durationMs: 0,
           });
           this.#releaseSession(worker, session);
-          return maxSeq;
+          return;
         }
         if (kind === "turn.failed") {
+          session.eventCursor = maxSeq;
           this.#settleTurn(turn, {
             status: "failed",
             agentId: turn.agentId,
@@ -577,20 +614,22 @@ export class ProtocolAgentExecutor implements AgentExecutor {
             error: String(payload.error ?? payload.message ?? "turn failed"),
           });
           this.#poisonSession(worker, session);
-          return maxSeq;
+          return;
         }
       }
-      return maxSeq;
+      session.eventCursor = maxSeq;
+      return;
     } catch {
-      return afterSeq; // 轮询失败:下一轮再试;崩溃由 exit 处理
+      return; // 轮询失败:下一轮再试;崩溃由 exit 处理
     }
   }
 
-  /** 单一结算入口:幂等;清理活动表/timer。 */
+  /** 单一结算入口:幂等;清理活动表/timer/poll(P0-B: 防 interval 泄漏)。 */
   #settleTurn(turn: Turn, result: AgentResult): void {
     if (turn.settled) return;
     turn.settled = true;
     clearTimeout(turn.timer);
+    turn.pollStop?.();
     this.#turns.delete(turn.agentId);
     for (const worker of this.#processes) {
       for (const session of worker.sessions.values()) {

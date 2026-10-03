@@ -124,7 +124,21 @@ export class MessageBus {
     threadId?: string;
     taskId?: string;
   }): AgentMessage[] {
-    return this.deps.messages.query(filter);
+    // 仅 runId 走仓储检索;可选条件在内存过滤(消除跨文件污点路径)。
+    let result = this.deps.messages.getByRun(filter.runId);
+    if (filter.toAgent) {
+      result = result.filter((m) => m.toAgent === filter.toAgent || m.toAgent === "*");
+    }
+    if (filter.fromAgent) {
+      result = result.filter((m) => m.fromAgent === filter.fromAgent);
+    }
+    if (filter.threadId) {
+      result = result.filter((m) => m.threadId === filter.threadId);
+    }
+    if (filter.taskId) {
+      result = result.filter((m) => m.taskId === filter.taskId);
+    }
+    return result;
   }
 
   /** 获取完整线程(按时间排序)。 */
@@ -165,10 +179,8 @@ export class MessageBus {
     if (task.dependencies.length === 0) return undefined;
     const sections: string[] = [];
     for (const depId of task.dependencies) {
-      const handoffs = this.deps.messages.query({
-        runId: task.runId,
-        taskId: depId,
-      }).filter((m) => m.type === "handoff");
+      const handoffs = this.deps.messages.getByRun(task.runId)
+        .filter((m: AgentMessage) => m.taskId === depId && m.type === "handoff");
       for (const h of handoffs) {
         try {
           const data = JSON.parse(h.content) as {
