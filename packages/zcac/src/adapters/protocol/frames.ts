@@ -26,8 +26,8 @@ export interface ProtocolNotification {
 
 export type ProtocolFrame = ProtocolResponse | ProtocolNotification;
 
-/** 编码一帧 NDJSON(含换行)。 */
-export function encodeFrame(frame: ProtocolRequest): string {
+/** 编码一帧 NDJSON(含换行)。请求与响应都可编码。 */
+export function encodeFrame(frame: ProtocolRequest | ProtocolResponse): string {
   return `${JSON.stringify(frame)}\n`;
 }
 

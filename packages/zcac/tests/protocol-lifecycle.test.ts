@@ -122,6 +122,7 @@ describe("ProtocolAgentExecutor lifecycle (fake child)", () => {
     const controllers: FakeChildController[] = [];
     const executor = new ProtocolAgentExecutor({
       spawnOverride: scriptedSpawn(controllers),
+      cliBundlePath: "fake/zcode.cjs",
       taskTimeoutMs: 5_000,
     });
 
@@ -151,6 +152,7 @@ describe("ProtocolAgentExecutor lifecycle (fake child)", () => {
     const controllers: FakeChildController[] = [];
     const executor = new ProtocolAgentExecutor({
       spawnOverride: scriptedSpawn(controllers),
+      cliBundlePath: "fake/zcode.cjs",
       taskTimeoutMs: 5_000,
     });
 
@@ -185,6 +187,7 @@ describe("ProtocolAgentExecutor lifecycle (fake child)", () => {
     const controllers: FakeChildController[] = [];
     const executor = new ProtocolAgentExecutor({
       spawnOverride: scriptedSpawn(controllers),
+      cliBundlePath: "fake/zcode.cjs",
       taskTimeoutMs: 5_000,
     });
 
@@ -209,6 +212,7 @@ describe("ProtocolAgentExecutor lifecycle (fake child)", () => {
     const controllers: FakeChildController[] = [];
     const executor = new ProtocolAgentExecutor({
       spawnOverride: scriptedSpawn(controllers),
+      cliBundlePath: "fake/zcode.cjs",
       taskTimeoutMs: 5_000,
     });
 
@@ -230,6 +234,7 @@ describe("ProtocolAgentExecutor lifecycle (fake child)", () => {
     const controllers: FakeChildController[] = [];
     const executor = new ProtocolAgentExecutor({
       spawnOverride: scriptedSpawn(controllers),
+      cliBundlePath: "fake/zcode.cjs",
       taskTimeoutMs: 50, // 极短超时
     });
 
@@ -259,6 +264,7 @@ describe("ProtocolAgentExecutor lifecycle (fake child)", () => {
     const controllers: FakeChildController[] = [];
     const executor = new ProtocolAgentExecutor({
       spawnOverride: scriptedSpawn(controllers),
+      cliBundlePath: "fake/zcode.cjs",
       taskTimeoutMs: 5_000,
     });
 
