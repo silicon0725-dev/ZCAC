@@ -17,6 +17,7 @@
  *   ZCAC_DATA_DIR    状态目录(默认 ~/.zcode/zcac)
  *   ZCAC_WORKSPACE   默认工作目录(默认 process.cwd(),插件拉起时即工作区)
  *   ZCAC_CONCURRENCY 全局任务并发(默认 2)
+ *   ZCAC_DASHBOARD_PORT Web Dashboard 端口(0=关闭;默认 0)
  *   ZCAC_TEST_FAKE   =1 时用 AutoFakeExecutor(测试钩子,无真实模型调用)
  */
 
@@ -38,6 +39,7 @@ import { AutoFakeExecutor } from "../adapters/fake/agent-executor.js";
 import type { AgentExecutor } from "../ports/agent-executor.js";
 import type { Task } from "../domain/task/task.js";
 import type { TaskStatus } from "../domain/task/task-status.js";
+import { DashboardServer } from "./dashboard-server.js";
 
 const DEFAULT_MODEL = "bigmodel-api/GLM-5.3-Flash@low";
 
@@ -146,6 +148,29 @@ async function main(): Promise<void> {
 
     console.error(`  ${icon} ${event.type.padEnd(22)} ${taskId.padEnd(15)} ${detail}`);
   });
+
+  // ---- 实时 Web Dashboard(HTTP + SSE) ----
+  const dashPort = Number(env("ZCAC_DASHBOARD_PORT") ?? "0");
+  if (dashPort > 0) {
+    const dashboard = new DashboardServer({
+      getRun: () => {
+        const runId = latestRunId(app);
+        return runId ? app.runs.get(runId) : undefined;
+      },
+      getTasks: () => {
+        const runId = latestRunId(app);
+        return runId ? app.tasks.listByRun(runId) : [];
+      },
+      getMessages: (rid: string) => {
+        if (!app.messageBus) return [];
+        return app.messageBus.getMessages({ runId: rid }).slice(-10);
+      },
+      getEvents: (rid: string) => app.journal.listByRun(rid).slice(-30),
+      port: dashPort,
+    });
+    dashboard.start();
+    app.bus.subscribe((event) => dashboard.broadcastEvent(event));
+  }
 
   // 定期输出进度摘要(每 30s 如果有活动任务)
   const progressInterval = setInterval(() => {
