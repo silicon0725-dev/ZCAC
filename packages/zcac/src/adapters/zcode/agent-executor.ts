@@ -43,6 +43,25 @@ import {
   buildAgentDiscoveryInstructions,
 } from "../../application/agent-communication.js";
 import { createDefaultCapabilityRegistry } from "../../domain/agent/agent-pool.js";
+import { findSkills, DEFAULT_SKILLS } from "../../domain/agent/default-skills.js";
+import { buildSkillInstructions } from "../../domain/agent/skill.js";
+import { SPECIALIZED_PROFILES, GENERIC_ROLE_SKILLS } from "../../domain/agent/specialized-profiles.js";
+
+const DEFAULT_REGISTRY = createDefaultCapabilityRegistry();
+for (const profile of SPECIALIZED_PROFILES) {
+  DEFAULT_REGISTRY.register({
+    role: profile.role,
+    capabilities: [...profile.skills],
+    defaultQuota: profile.defaultQuota,
+  });
+}
+const AGENT_DISCOVERY = buildAgentDiscoveryInstructions(DEFAULT_REGISTRY);
+
+function skillInstructionsFor(role: string): string {
+  const profile = SPECIALIZED_PROFILES.find((p) => p.role === role);
+  const names = profile?.skills ?? GENERIC_ROLE_SKILLS[role] ?? [];
+  return buildSkillInstructions(findSkills(names, DEFAULT_SKILLS));
+}
 
 const CODER_PROMPT = [
   "You are a ZCAC Coder worker agent inside the ZCode Agent Cluster.",
@@ -50,31 +69,39 @@ const CODER_PROMPT = [
   "Work only inside the current working directory.",
   "When the change is done, reply with a short summary: the files you changed and what you did.",
 ].join("\n") +
-  buildCommunicationInstructions(["explorer", "tester", "planner"]);
+  buildCommunicationInstructions(["explorer", "tester", "planner", "backend-coder", "frontend-coder", "ux-designer", "ui-designer", "market-researcher"]) +
+  AGENT_DISCOVERY +
+  skillInstructionsFor("coder");
 
 const EXPLORER_PROMPT = [
   "You are a ZCAC Explorer worker agent inside the ZCode Agent Cluster.",
   "You are read-only: analyze the repository, never modify files.",
   "Report findings as a concise structured summary (files, symbols, call relations) with evidence paths.",
 ].join("\n") +
-  buildCommunicationInstructions(["coder", "planner"]);
+  buildCommunicationInstructions(["coder", "planner", "backend-coder", "frontend-coder", "market-researcher"]) +
+  AGENT_DISCOVERY +
+  skillInstructionsFor("explorer");
 
 const PLANNER_PROMPT = [
   "You are a ZCAC Planner worker agent inside the ZCode Agent Cluster.",
   "You decompose a feature request into an ordered task list with dependencies.",
   "You do not write product code. Output a numbered plan with file-level pointers.",
-].join("\n");
+].join("\n") +
+  skillInstructionsFor("planner");
 
 const TESTER_PROMPT = [
   "You are a ZCAC Tester worker agent inside the ZCode Agent Cluster.",
   "You run builds, tests and static checks, then report pass/fail with command output evidence.",
 ].join("\n") +
-  buildCommunicationInstructions(["coder", "reviewer"]);
+  buildCommunicationInstructions(["coder", "reviewer", "integration-tester"]) +
+  AGENT_DISCOVERY +
+  skillInstructionsFor("tester");
 
 const REVIEWER_PROMPT = [
   "You are a ZCAC Reviewer worker agent inside the ZCode Agent Cluster.",
   "You are read-only. Review diffs/code against the task intent and report findings with severity, file and line.",
-].join("\n");
+].join("\n") +
+  skillInstructionsFor("reviewer");
 
 export const ROLE_PRESETS: Record<string, RolePreset> = {
   coder: {

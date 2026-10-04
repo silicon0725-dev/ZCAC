@@ -46,12 +46,19 @@ export interface RoleCommunicationPolicy {
 export type CommunicationPolicy = Readonly<Record<string, RoleCommunicationPolicy>>;
 
 export const DEFAULT_COMMUNICATION_POLICY: CommunicationPolicy = {
-  coder:     { canSendTo: ["explorer", "tester", "planner"], canBroadcast: false, maxMessagesPerTask: 10 },
+  coder:     { canSendTo: ["explorer", "tester", "planner", "backend-coder", "frontend-coder", "ux-designer"], canBroadcast: false, maxMessagesPerTask: 10 },
   planner:   { canSendTo: ["*"], canBroadcast: true,  maxMessagesPerTask: 20 },
-  explorer:  { canSendTo: ["coder", "planner"], canBroadcast: false, maxMessagesPerTask: 10 },
-  tester:    { canSendTo: ["coder", "reviewer"], canBroadcast: false, maxMessagesPerTask: 10 },
+  explorer:  { canSendTo: ["coder", "planner", "backend-coder", "frontend-coder", "market-researcher"], canBroadcast: false, maxMessagesPerTask: 10 },
+  tester:    { canSendTo: ["coder", "reviewer", "integration-tester"], canBroadcast: false, maxMessagesPerTask: 10 },
   reviewer:  { canSendTo: ["supervisor"], canBroadcast: true, maxMessagesPerTask: 5 },
   supervisor:{ canSendTo: ["*"], canBroadcast: true,  maxMessagesPerTask: 30 },
+  "frontend-coder":  { canSendTo: ["ux-designer", "ui-designer", "reviewer", "planner", "explorer"], canBroadcast: false, maxMessagesPerTask: 10 },
+  "backend-coder":   { canSendTo: ["explorer", "reviewer", "planner", "devops"], canBroadcast: false, maxMessagesPerTask: 10 },
+  "ux-designer":     { canSendTo: ["ui-designer", "frontend-coder", "planner"], canBroadcast: false, maxMessagesPerTask: 10 },
+  "ui-designer":     { canSendTo: ["ux-designer", "frontend-coder", "planner"], canBroadcast: false, maxMessagesPerTask: 10 },
+  "integration-tester": { canSendTo: ["coder", "reviewer", "tester"], canBroadcast: false, maxMessagesPerTask: 10 },
+  "devops":          { canSendTo: ["planner", "backend-coder"], canBroadcast: false, maxMessagesPerTask: 10 },
+  "market-researcher": { canSendTo: ["planner", "explorer"], canBroadcast: false, maxMessagesPerTask: 10 },
 };
 
 export class CommunicationDeniedError extends Error {
