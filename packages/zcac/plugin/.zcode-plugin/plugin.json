@@ -1,6 +1,6 @@
 {
   "name": "zcode-agent-cluster",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "ZCAC — multi-agent coding cluster orchestration on top of the ZCode Agent Runtime (task graph, scheduler, agent pool, review loop, git worktree isolation).",
   "author": { "name": "ZCAC" },
   "license": "Apache-2.0",

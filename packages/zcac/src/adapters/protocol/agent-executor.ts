@@ -58,14 +58,14 @@ interface WorkerSession {
   activeTurn?: Turn;
   /** 超时/崩溃/stop 后置位:worker 必须弃用。 */
   poisoned: boolean;
+  /** 防同一 session 并发多个 in-flight session/events RPC。 */
+  pollInFlight: boolean;
   /**
    * session/events 消费游标(P0-A)。
    * 挂在 session 上而非 turn 局部:session 复用时 Task B 从 Task A
    * 停止的位置继续消费,不会重放旧 turn.completed 造成假完成。
    */
   eventCursor: number;
-  /** 防同一 session 并发多个 in-flight session/events RPC。 */
-  pollInFlight: boolean;
 }
 
 interface Turn {
@@ -417,7 +417,7 @@ export class ProtocolAgentExecutor implements AgentExecutor {
     // 复制后遍历:poll.stop() 会从 worker.polls 中自删,直接遍历会跳过条目
     for (const poll of [...worker.polls]) poll.stop();
     worker.polls = [];
-    // reject 全部 pending rpc(P1: 否则挂到 60s timeout)
+    // reject 全部 pending rpc(否则挂到 60s timeout,P1: 资源泄漏)
     for (const [id, resolver] of [...worker.pendingRpc]) {
       worker.pendingRpc.delete(id);
       resolver({ id, error: { code: -32000, message: "worker process killed" } });

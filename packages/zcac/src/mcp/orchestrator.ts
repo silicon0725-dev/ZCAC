@@ -86,6 +86,81 @@ async function main(): Promise<void> {
       `${Object.keys(roleModels).length > 0 ? `, roleModels=${JSON.stringify(roleModels)}` : ""})`,
   );
 
+  // ---- 实时 stderr 日志流:所有事件格式化输出到编排器 stderr ----
+  // 用户在 ZCode 终端/输出面板中可以直接看到集群在干什么。
+  const EVENT_ICONS: Record<string, string> = {
+    RUN_CREATED: "🚀", RUN_STARTED: "▶️", RUN_COMPLETED: "✅", RUN_FAILED: "❌",
+    TASK_CREATED: "📋", TASK_READY: "🟡", TASK_STARTED: "⚙️", TASK_SUCCEEDED: "✅",
+    TASK_FAILED: "❌", TASK_RETRY: "🔄", TASK_BLOCKED: "🔒",
+    AGENT_ASSIGNED: "👤", AGENT_RELEASED: "👋",
+    ARTIFACT_CREATED: "📦",
+    WORKTREE_CREATED: "🌲", WORKTREE_REMOVED: "🗑️",
+    MERGE_STARTED: "🔀", MERGE_COMPLETED: "🔀", MERGE_CONFLICT: "⚠️",
+    SUPERVISOR_DECISION: "🧠",
+    ERROR: "💥",
+  };
+
+  const activeTasks = new Map<string, { kind: string; role: string; status: string }>();
+
+  app.bus.subscribe((event) => {
+    const icon = EVENT_ICONS[event.type] ?? "•";
+    const taskId = event.taskId?.slice(0, 13) ?? "";
+    const payload = event.payload as Record<string, unknown> ?? {};
+
+    // 追踪任务状态用于进度条
+    if (event.type === "TASK_CREATED" && event.taskId) {
+      activeTasks.set(event.taskId, {
+        kind: String(payload.kind ?? "?"),
+        role: String(payload.role ?? "?"),
+        status: "pending",
+      });
+    }
+    const tracked = event.taskId ? activeTasks.get(event.taskId) : undefined;
+    if (tracked && event.type.startsWith("TASK_")) {
+      const statusMap: Record<string, string> = {
+        TASK_READY: "ready", TASK_STARTED: "running", TASK_SUCCEEDED: "done",
+        TASK_FAILED: "failed", TASK_RETRY: "retrying", TASK_BLOCKED: "blocked",
+      };
+      const newStatus = statusMap[event.type];
+      if (newStatus) tracked.status = newStatus;
+    }
+
+    // 格式化 stderr 行
+    let detail = "";
+    if (event.type === "TASK_STARTED") {
+      detail = payload.attempt ? ` (attempt ${payload.attempt})` : "";
+    } else if (event.type === "TASK_SUCCEEDED") {
+      const dur = payload.durationMs ? ` ${Math.round(Number(payload.durationMs) / 1000)}s` : "";
+      detail = dur;
+    } else if (event.type === "AGENT_ASSIGNED") {
+      detail = ` → ${payload.agentId} [${payload.model}]`;
+    } else if (event.type === "SUPERVISOR_DECISION") {
+      detail = ` ${payload.action} (trigger: ${payload.trigger})`;
+    } else if (event.type === "MERGE_CONFLICT") {
+      detail = ` files: ${JSON.stringify(payload.conflictFiles)}`;
+    } else if (event.type === "RUN_COMPLETED" || event.type === "RUN_FAILED") {
+      const total = activeTasks.size;
+      const done = [...activeTasks.values()].filter((t) => ["done", "succeeded", "failed", "cancelled"].includes(t.status)).length;
+      detail = ` ${done}/${total} tasks`;
+    }
+
+    console.error(`  ${icon} ${event.type.padEnd(22)} ${taskId.padEnd(15)} ${detail}`);
+  });
+
+  // 定期输出进度摘要(每 30s 如果有活动任务)
+  const progressInterval = setInterval(() => {
+    if (activeDrains.size === 0) return;
+    const runId = [...activeDrains.keys()][0];
+    if (!runId) return;
+    const tasks = app.tasks.listByRun(runId);
+    if (tasks.length === 0) return;
+    const counts: Record<string, number> = {};
+    for (const t of tasks) counts[t.status] = (counts[t.status] ?? 0) + 1;
+    const summary = Object.entries(counts).map(([s, n]) => `${n} ${s}`).join(", ");
+    console.error(`  📊 [${new Date().toISOString().slice(11, 19)}] ${summary}`);
+  }, 30_000);
+  progressInterval.unref();
+
   // 后台 run 登记表:cluster_status 聚合 + 崩溃语义。
   const activeDrains = new Map<string, Promise<void>>();
 
@@ -510,6 +585,97 @@ async function main(): Promise<void> {
   // -------------------------------------------------------------------------
   // Agent Discovery (ZCAC-0014)
   // -------------------------------------------------------------------------
+
+  registerZcacTool(
+    "cluster_dashboard",
+    {
+      description:
+        "Get a formatted real-time dashboard of the cluster run. Returns a text table showing each agent's current activity, status bar, elapsed time, and latest events. Designed for the main model to present directly to the user in the conversation.",
+      inputSchema: {
+        runId: z.string().optional(),
+      },
+    },
+    async (input: { runId?: string }) => {
+      try {
+        const runId = input.runId ?? latestRunId(app);
+        if (!runId) return ok({ dashboard: "No active run." });
+        const run = app.runs.get(runId);
+        if (!run) throw new Error(`run not found: ${runId}`);
+        const tasks = app.tasks.listByRun(runId);
+        const events = app.journal.listByRun(runId);
+        const now = Date.now();
+
+        // 状态图标
+        const icons: Record<string, string> = {
+          pending: "⏳", ready: "🟡", running: "⚙️", blocked: "🔒",
+          succeeded: "✅", failed: "❌", retry_wait: "🔄", cancelled: "🚫", interrupted: "⚡",
+        };
+
+        // 计算时间
+        // 从最早的任务 startedAt 计算 elapsed(或从 run.createdAt)
+        const startedAt = tasks
+          .map((t) => t.startedAt ?? t.createdAt)
+          .reduce((min, v) => Math.min(min, v), Number.MAX_SAFE_INTEGER);
+        const elapsed = startedAt < Number.MAX_SAFE_INTEGER
+          ? Math.round((now - startedAt) / 1000)
+          : Math.round((now - run.createdAt) / 1000);
+        const timeStr = `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`;
+
+        // 任务表格
+        const taskRows = tasks.map((task) => {
+          const icon = icons[task.status] ?? "?";
+          const role = (task.input.role ?? "coder").padEnd(8);
+          const kind = task.kind.padEnd(10);
+          const status = task.status.padEnd(10);
+          const dur = task.startedAt
+            ? task.completedAt
+              ? `${Math.round((task.completedAt - task.startedAt) / 1000)}s`
+              : `${Math.round((now - task.startedAt) / 1000)}s…`
+            : "—";
+          const attempt = task.attempt > 1 ? ` r${task.attempt}` : "";
+          const summary = task.output?.summary?.slice(0, 40) ?? task.error?.code ?? "";
+          return `  ${icon} ${role} ${kind} ${status} ${dur.padStart(5)}${attempt}  ${summary}`;
+        });
+
+        // 事件尾(最近 8 条)
+        const eventTail = events.slice(-8).map((e) => {
+          const icon = EVENT_ICONS[e.type] ?? "•";
+          return `  ${icon} #${e.sequence} ${e.type}`;
+        });
+
+        // 最新消息
+        const recentMessages = app.messageBus
+          ? app.messageBus.getMessages({ runId }).slice(-5)
+          : [];
+        const messageLines = recentMessages.map((m) =>
+          `  ${m.fromAgent} → ${m.toAgent}: ${m.content.slice(0, 60)}`);
+
+        const dashboard = [
+          `## 📊 ZCAC Cluster Dashboard`,
+          ``,
+          `**Run:** \`${runId.slice(0, 18)}…\`  **Status:** ${run.status}  **Elapsed:** ${timeStr}`,
+          `**Tasks:** ${tasks.length} total | ${tasks.filter((t) => t.status === "succeeded").length} ✅ | ${tasks.filter((t) => t.status === "running").length} ⚙️ | ${tasks.filter((t) => t.status === "failed").length} ❌`,
+          ``,
+          `### Agents`,
+          "```",
+          ...taskRows,
+          "```",
+          ``,
+          `### Recent Events`,
+          "```",
+          ...eventTail,
+          "```",
+          ...(messageLines.length > 0
+            ? [``, `### Messages`, "```", ...messageLines, "```"]
+            : []),
+        ].join("\n");
+
+        return ok({ dashboard, runId, status: run.status });
+      } catch (error) {
+        return err(error);
+      }
+    },
+  );
 
   registerZcacTool(
     "list_agents",
