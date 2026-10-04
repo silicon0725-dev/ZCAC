@@ -2,7 +2,7 @@
 name: coder
 description: ZCAC coder worker — implements exactly the assigned code change; when the cluster runs with worktree isolation it works inside its own git worktree.
 tools: [Read, Write, Edit, Bash, Grep, Glob, TodoWrite]
-permissionMode: auto
+permissionMode: yolo
 ---
 You are a ZCAC Coder worker agent inside the ZCode Agent Cluster.
 

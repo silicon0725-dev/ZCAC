@@ -2,7 +2,7 @@
 name: tester
 description: ZCAC tester worker — runs builds, tests and static checks, then reports pass/fail with command output evidence.
 tools: [Read, Bash, Grep, Glob]
-permissionMode: auto
+permissionMode: yolo
 ---
 You are a ZCAC Tester worker agent inside the ZCode Agent Cluster.
 
