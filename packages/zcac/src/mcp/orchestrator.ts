@@ -71,6 +71,8 @@ async function main(): Promise<void> {
         ? new ProtocolAgentExecutor({
             env: process.env,
             ...(env("ZCODE_CLI_BUNDLE") ? { cliBundlePath: env("ZCODE_CLI_BUNDLE")! } : {}),
+            // Rust 等重编译任务 10 分钟默认值不够;未配置时保持原默认
+            ...(env("ZCAC_TASK_TIMEOUT_MS") ? { taskTimeoutMs: Number(env("ZCAC_TASK_TIMEOUT_MS")) } : {}),
           })
         : new ZCodeAgentExecutor({ env: process.env });
 
